@@ -1,0 +1,328 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+/* ==========================================================================
+   Agents OS — design tokens
+   --------------------------------------------------------------------------
+   "Warm stone instrument." A dispatch board for autonomous agents.
+
+   Canvas and surface are different materials, not different greys: the rail
+   and every panel share the same warm stone surface, the page behind them is
+   darker. Aqua is the only saturated colour the interface owns — green, amber
+   and red belong to state and never decorate. Type does the hierarchy.
+
+   The token names follow the shadcn contract and are exposed to Tailwind v4
+   as utilities (bg-background, text-muted-foreground, border-border, …)
+   through the @theme inline block. The app is dark-only: the .dark class on
+   <html> is the single theme, and both selectors carry the same palette.
+
+   Radius system (documented rule, followed everywhere):
+     rounded-md  (9px)   controls, wells, small inputs
+     rounded-2xl (16px)  panels, cards, message bubbles and other surfaces
+     rounded-full        interactive pills (chips, segmented control, search)
+   ========================================================================== */
+
+:root,
+.dark {
+  color-scheme: dark;
+
+  --background: #121311;
+  --foreground: #ecede7;
+
+  --card: #191a17;
+  --card-foreground: #ecede7;
+
+  --popover: #212320;
+  --popover-foreground: #ecede7;
+
+  --primary: #2dd4bf;
+  --primary-foreground: #042f2b;
+
+  --secondary: #212320;
+  --secondary-foreground: #ecede7;
+
+  --muted: #212320;
+  --muted-foreground: #a2a69b;
+
+  --accent: #262824;
+  --accent-foreground: #ecede7;
+
+  --destructive: #e77c74;
+  --destructive-foreground: #1c0a08;
+
+  --border: #2a2c27;
+  --input: #3a3d36;
+  --ring: #2dd4bf;
+
+  --radius: 11px;
+
+  --chart-1: #2dd4bf;
+  --chart-2: #6bcb84;
+  --chart-3: #e3b457;
+  --chart-4: #e77c74;
+  --chart-5: #a78bfa;
+
+  /* Semantic state colours — never used as decoration. */
+  --success: #6bcb84;
+  --warning: #e3b457;
+  --danger: #e77c74;
+  --signal-soft: rgba(45, 212, 191, 0.12);
+  --signal-line: rgba(45, 212, 191, 0.34);
+
+  /* Warm stone ramp used by the page chrome. */
+  --surface: #191a17;
+  --surface-2: #212320;
+  --inset: #0e0f0d;
+  --rule: #2a2c27;
+  --rule-2: #3a3d36;
+  --ink: #121311;
+  --mute: #83877a;
+
+  --sans: 'Archivo Variable', 'Archivo', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', Consolas, monospace;
+
+  --shadow-panel: 0 20px 44px -30px rgba(0, 0, 0, 0.9), 0 1px 0 rgba(255, 255, 255, 0.028) inset;
+  --shadow-float: 0 26px 60px -34px rgba(0, 0, 0, 0.95), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-signal-soft: var(--signal-soft);
+  --color-signal-line: var(--signal-line);
+
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-inset: var(--inset);
+  --color-rule: var(--rule);
+  --color-rule-2: var(--rule-2);
+  --color-ink: var(--ink);
+  --color-mute: var(--mute);
+
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+
+  --shadow-panel: var(--shadow-panel);
+  --shadow-float: var(--shadow-float);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --animate-breathe: breathe 2.2s ease-in-out infinite;
+
+  @keyframes breathe {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    @apply bg-background font-sans text-sm leading-relaxed text-foreground antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+
+  ::selection {
+    background: rgba(45, 212, 191, 0.3);
+    color: #fff;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2f322c;
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #40443c;
+    background-clip: content-box;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 5px;
+  }
+
+  h1 {
+    @apply m-0 text-3xl font-semibold leading-tight tracking-tight text-balance;
+  }
+  h2 {
+    @apply m-0 text-[15px] font-semibold leading-snug tracking-tight text-balance;
+  }
+  h3 {
+    @apply m-0 text-sm font-semibold;
+  }
+  p {
+    @apply my-1.5 text-pretty;
+  }
+  /* Links carry no underline; only content links do (.md below), so controls,
+     menu items and row links never look like prose. */
+  a {
+    @apply text-primary no-underline;
+  }
+  a:hover {
+    color: color-mix(in oklab, var(--primary) 80%, white);
+  }
+
+  code,
+  pre {
+    @apply font-mono;
+  }
+  code {
+    @apply rounded-[5px] border border-rule bg-inset px-[5px] py-0.5 text-[0.88em] text-[#c3c8ba];
+  }
+  pre {
+    @apply m-0 whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed;
+  }
+  kbd {
+    @apply rounded-[5px] border border-rule-2 bg-surface-2 px-[5px] py-px font-mono text-[11px] text-muted-foreground;
+  }
+}
+
+/* ── Agent output (markdown) ─────────────────────────────────────────────── */
+
+.md {
+  @apply text-sm leading-relaxed;
+  overflow-wrap: anywhere;
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md p {
+  @apply mb-2.5 mt-0;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  @apply my-4 mb-2 font-semibold leading-snug tracking-tight;
+}
+.md h1 {
+  @apply text-[17px];
+}
+.md h2 {
+  @apply text-[15px];
+}
+.md h3 {
+  @apply text-sm;
+}
+.md h4 {
+  @apply text-[13.5px];
+}
+.md ul,
+.md ol {
+  @apply mb-2.5 mt-0 pl-5;
+}
+.md li {
+  @apply my-0.5;
+}
+.md li > p {
+  @apply mb-1 mt-0;
+}
+.md strong {
+  @apply font-semibold text-white;
+}
+.md a {
+  @apply underline underline-offset-[3px];
+}
+.md hr {
+  @apply my-4 border-t border-rule;
+}
+.md blockquote {
+  @apply mb-2.5 mt-0 border-l-2 border-rule-2 py-0.5 pl-3 text-muted-foreground;
+}
+.md code {
+  @apply px-[5px] py-px text-xs;
+}
+.md pre {
+  @apply mb-2.5 mt-0 overflow-x-auto rounded-[9px] border border-rule bg-inset px-3 py-2.5;
+}
+.md pre code {
+  @apply border-0 bg-transparent p-0 text-[11.5px];
+}
+
+/* GFM tables: the shape agents reach for most often. */
+.md-table {
+  @apply mb-3 max-w-full overflow-x-auto rounded-[9px] border border-rule;
+}
+.md-table table {
+  @apply w-max min-w-full border-collapse text-[12.5px];
+}
+.md-table th {
+  @apply whitespace-nowrap bg-surface-2 text-left font-medium text-mute;
+}
+.md-table th,
+.md-table td {
+  @apply border-b border-rule px-3 py-2 align-top;
+}
+.md-table td {
+  max-width: 46ch;
+}
+.md-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* ── Motion preferences ──────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

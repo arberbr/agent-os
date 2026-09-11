@@ -1,0 +1,19 @@
+{
+  "name": "agent-os",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agents OS — create multi-agent teams that manage your work, integrated with Google services (Gmail, Calendar, Drive, YouTube).",
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @agent-os/server --filter @agent-os/web dev",
+    "dev:server": "pnpm --filter @agent-os/server dev",
+    "dev:web": "pnpm --filter @agent-os/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "start": "pnpm --filter @agent-os/server start"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.7.0"
+}
