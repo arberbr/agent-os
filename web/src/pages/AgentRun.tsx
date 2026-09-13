@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from '@tanstack/react-router';
 import { useChat } from '@ai-sdk/react';
-import { listAgents } from '../api';
+import { listAgents, listSchedules } from '../api';
 import { AgentChatTransport } from '../lib/agent-chat-transport';
 import { Conversation, ConversationContent, ConversationEmptyState, ConversationScrollButton } from '../components/ai-elements/conversation';
 import { Loader } from '../components/ai-elements/loader';
@@ -80,6 +80,8 @@ export default function AgentRun() {
   const [agents, setAgents] = useState<AgentDef[]>([]);
   const [agent, setAgent] = useState<AgentDef | null>(null);
   const [load, setLoad] = useState<'loading' | 'ready' | 'missing' | 'error'>('loading');
+  /** How many cadences already point at this agent (shown on the Schedule button). */
+  const [scheduleCount, setScheduleCount] = useState(0);
 
   const transport = useMemo(() => new AgentChatTransport(id), [id]);
   const { messages, sendMessage, setMessages, status, error, stop } = useChat({
@@ -91,6 +93,21 @@ export default function AgentRun() {
   useEffect(() => {
     setMessages([]);
   }, [id, setMessages]);
+
+  // Recurring work for this agent, surfaced on the Schedule button.
+  useEffect(() => {
+    let alive = true;
+    void listSchedules()
+      .then((list) => {
+        if (alive) setScheduleCount(list.filter((schedule) => schedule.agentId === id).length);
+      })
+      .catch(() => {
+        if (alive) setScheduleCount(0);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [id]);
 
   useEffect(() => {
     let alive = true;
@@ -121,6 +138,15 @@ export default function AgentRun() {
     const text = message.text.trim();
     if (!text || running) return;
     sendMessage({ text });
+  };
+
+  /**
+   * End the conversation. The transport drops the session id, so the next
+   * message opens a new server-side session instead of adding to this one.
+   */
+  const handleNewSession = () => {
+    transport.startNewSession();
+    setMessages([]);
   };
 
   if (load === 'loading') {
@@ -233,8 +259,26 @@ export default function AgentRun() {
               <Icon name="edit" size={14} /> Edit
             </Link>
           </Button>
-          <Button variant="secondary" onClick={() => setMessages([])}>
-            <Icon name="refresh" size={14} /> Clear
+          <Button
+            variant="secondary"
+            asChild
+            title={
+              scheduleCount > 0
+                ? `This agent runs on ${plural(scheduleCount, 'schedule')}`
+                : 'Give this agent a recurring task'
+            }
+          >
+            <Link to="/schedules">
+              <Icon name="clock" size={14} /> {scheduleCount > 0 ? `Scheduled (${scheduleCount})` : 'Schedule'}
+            </Link>
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={handleNewSession}
+            disabled={running}
+            title="End this conversation; the next message starts a new one"
+          >
+            <Icon name="refresh" size={14} /> New session
           </Button>
         </PageActions>
       </PageHeader>

@@ -8,16 +8,24 @@ and [`docs/research/google-integration.md`](research/google-integration.md).
 
 ```
 ┌────────────────────────── web (React + Vite, :5173) ──────────────────────────┐
-│ Dashboard · Agents (list/editor) · Run view (chat + live activity rail)       │
-│ Runs history · Integrations (Google OAuth + GitHub/Vercel/Supabase + tests)    │
+│ Login / signup · Dashboard · Agents (list/editor) · Run view (chat + live      │
+│ activity rail) · Runs history · Schedules · Integrations · Settings            │
 └──────────────────────────────────┬─────────────────────────────────────────────┘
-                                   │ REST + SSE (vite proxy /api → :8787)
+                                   │ REST + SSE (vite proxy /api → :8787) + session cookie
 ┌──────────────────────────────────▼─────────────────────────────────────────────┐
 │ server (Node + Express, :8787)                                                 │
 │                                                                                │
 │  api/app.ts          REST routes, SSE run stream, OAuth callback, self-tests   │
+│  api/auth.ts         signup/login/logout/state, own-profile routes             │
+│  api/admin.ts        instance settings + user management (admin only)          │
+│  api/schedules.ts    recurring runs: CRUD, cadence preview, run-now            │
+│  auth.ts             scrypt hashes, session cookies, gate middleware, throttle │
+│  agents/executeRun.ts one turn end-to-end: context, loop, persistence          │
 │  agents/runAgent.ts  tool-calling loop, delegation, guardrails                 │
 │  agents/prompts.ts   system-prompt builder (persona + team roster + rules)     │
+│  agents/history.ts   session transcript → history prefix (budget + pairing)    │
+│  schedules/cron.ts   5-field cron: parse, validate, next firing, describe      │
+│  schedules/scheduler.ts  the tick loop: arm, fire, settle, pause               │
 │  tools/registry.ts   tool registry: {name, description, JSON schema, execute}  │
 │  tools/builtin.ts    now, memory_set, memory_get                               │
 │  tools/googleTools.ts  gmail_* calendar_* drive_* youtube_* (23 tools)         │
@@ -30,7 +38,8 @@ and [`docs/research/google-integration.md`](research/google-integration.md).
 │  github/client.ts    GitHub REST client (GITHUB_TOKEN from .env)               │
 │  vercel/client.ts    Vercel REST client (VERCEL_TOKEN, optional team)          │
 │  supabase/client.ts  PostgREST + management + storage + auth admin             │
-│  store.ts            JSON-file store: agents, runs, google token, agent memory │
+│  store.ts            JSON-file store: accounts, sessions, settings, agents,    │
+│                      runs, schedules, google tokens, agent memory              │
 └──────────────────────────────────┬─────────────────────────────────────────────┘
                                    │
                     ┌──────────────┴───────────────┐
@@ -43,9 +52,29 @@ and [`docs/research/google-integration.md`](research/google-integration.md).
 ## 2. Data model
 
 Everything persists to `server/data/db.json` (atomic writes: tmp file + rename, debounced 120 ms).
-The database is single-user by design:
+The workspace is shared — every account sees the same agents, runs and integrations —
+while access to it is account-gated (§3):
 
 ```ts
+User {
+  id, email,                                // email is the login id, lowercase + unique
+  name, role,                               // 'admin' | 'member'
+  passwordHash,                             // scrypt$<salt>$<key>, never leaves the server
+  createdAt, lastLoginAt
+}
+
+Session {                                   // one signed-in browser
+  id, userId, tokenHash,                    // sha-256 of the cookie token, never the token
+  createdAt, expiresAt, lastUsedAt
+}
+
+AppSettings {                               // instance knobs, edited on the Settings page
+  signupsEnabled,                           // false → only an admin adds accounts
+  allowedSignupDomains: string[],           // [] = any domain
+  sessionDays,                              // login lifetime
+  runHistoryLimit                           // sessions kept before the oldest are pruned
+}
+
 AgentDef {
   id, name, description, instructions,      // instructions = system prompt body
   model,                                    // '' → default LLM_MODEL
@@ -56,9 +85,11 @@ AgentDef {
 
 Run {
   id, agentId, title, status,               // running | completed | failed | cancelled
+  createdBy,                                // account that opened the session (null = legacy)
   messages: ChatMessage[],                  // full transcript incl. tool messages
   steps: RunStep[],                         // append-only activity log (replay/UI)
-  output, error, startedAt, finishedAt
+  output, error, startedAt, finishedAt,
+  scheduleId                                // set when a schedule fired this run
 }
 
 RunStep {
@@ -66,14 +97,67 @@ RunStep {
   toolName?, args?, result?, error?, note?, durationMs?, at
 }
 
+Schedule {                                  // a recurring run: agent + task + cadence
+  id, agentId, name, input,                 // input = the task handed over every firing
+  cron,                                     // 5-field cron, server local time
+  enabled, createdBy, createdAt, updatedAt,
+  nextRunAt,                                // precomputed by the engine for the console
+  lastRunAt, lastRunId, lastStatus, lastError,
+  runCount, failures,                       // failures = consecutive, drives the self-pause
+  pausedReason                              // why the engine paused it (agent gone, failures)
+}
+
 GoogleToken { userId, email, name, picture, scopes, accessToken, refreshToken, expiryDate, connectedAt }
 agentMemory: Record<agentId, Record<key, value>>   // long-term memory (memory_set/get)
 ```
 
-## 3. Agent runtime — the tool-calling loop
+A `Run` **is a session**: it is opened by the first message of a conversation and every
+later message is answered into the same record (see §6), so the transcript and the step
+log span the whole conversation while the title stays the opening prompt. The run screen
+replays that stored transcript with the same chat components the live view uses
+(`web/src/components/chat/run-transcript.ts` re-pairs stored assistant/tool messages into
+tool parts), so an open session and the same session read back from history look alike —
+while the Activity rail stays the place where tool arguments and results are inspected.
+
+## 3. Accounts, sessions and the gate
+
+The console used to be open to anyone who could reach the port; it now starts at a login
+screen (email + password) and every API route but `/api/health` and `/api/auth/*` answers
+`401` without a session.
+
+- **First run.** `store.countUsers() === 0` is reported as `needsSetup`; `POST /api/auth/signup`
+  gives that first account `role: 'admin'`. Signups being *closed* never blocks it — an
+  instance with no accounts must be able to create its admin.
+- **Passwords** are scrypt (per-account salt, 64-byte key) and compared with
+  `timingSafeEqual`. A login for an unknown email still verifies against a decoy hash, so
+  response time does not reveal whether an account exists. Failed logins are throttled
+  (8 per 10 minutes per email + IP).
+- **Sessions** are opaque 32-byte tokens in an `HttpOnly; SameSite=Lax` cookie (`Secure`
+  when `PUBLIC_URL` is https). The database stores only `sha256(token)`, so `db.json` cannot
+  be replayed as a login. `attachUser` resolves the cookie on every request; expired
+  sessions are dropped on load and on lookup. Changing a password (own, or an admin reset)
+  revokes that account's other sessions.
+- **The gate** is one line of Express in `api/app.ts`: public routes first, then
+  `app.use('/api', sameOriginOnly, requireAuth)` for everything else, then the admin router
+  (`requireAdmin`, so a member gets `403`). `sameOriginOnly` rejects state-changing requests
+  whose `Origin` is not `PUBLIC_URL`/`WEB_ORIGIN`, and CORS only reflects those origins with
+  credentials — the cookie cannot be ridden by another page.
+- **Admin surface** (`/api/admin/*`): the Settings page reads/writes `AppSettings` and
+  manages people — create an account directly (the path that works with signups off),
+  change a role, set a new password, remove an account. Guards make lockout impossible: you
+  cannot demote or delete yourself, and the last administrator cannot be demoted or removed.
+- **Navigation.** `web/src/lib/auth.tsx` holds the session in React context; the root route
+  renders the console when `/api/auth/state` reports a user and the login card when it does
+  not. Any `401` from any API call fires `agentos:unauthorized`, which re-asks that endpoint
+  and drops the UI back to the login screen — a deep link survives the round-trip, since
+  signing in simply renders the route the browser was already on.
+
+## 4. Agent runtime — the tool-calling loop
 
 ```text
 messages = [system(persona + team roster + operating rules)] + history + [user input]
+# history = the session's transcript so far, minus the system prompt: complete
+# tool call/result groups only, oldest turns dropped past CONVERSATION_HISTORY_MAX_CHARS
 
 for step in 1..AGENT_MAX_STEPS:
   emit(llm: "thinking")
@@ -90,19 +174,27 @@ for step in 1..AGENT_MAX_STEPS:
 # step limit reached → one final no-tools call that summarizes state
 ```
 
+`agents/executeRun.ts` wraps that loop into **one turn, end to end**: it splits the
+stored transcript into the replayed history prefix and this turn's starting point,
+streams every step/message into the `Run` record as it happens, and settles the record
+(`completed` / `failed` / `cancelled`) at the end. It exists because a turn now has two
+entry points — `POST /api/agents/:id/run` (SSE, someone watching) and the scheduler
+(§8, nobody watching) — and both must persist history identically.
+
 Guardrails (per landscape research):
 
 | Guardrail | Implementation |
 | --- | --- |
 | Step budget | `AGENT_MAX_STEPS` (default 12) |
 | Context budget | tool results truncated to `TOOL_RESULT_MAX_CHARS` (8 000) |
+| Conversation budget | prior turns replayed oldest-first up to `CONVERSATION_HISTORY_MAX_CHARS` (80 000 chars) |
 | Failure circuit-breaker | 3 consecutive tool failures abort the run |
 | Bad arguments | JSON parse errors surface as tool results instead of crashing |
 | Cancellation | `AbortSignal` from the SSE client disconnect → `cancelled` status |
 | Destructive actions | system-prompt rule: confirm before send/delete/share/publish |
 | Unknown tool calls | answered with the available-tool list as a tool result |
 
-## 4. Multi-agent orchestration — delegation as a tool
+## 5. Multi-agent orchestration — delegation as a tool
 
 Teams follow the **handoff-as-tool** pattern (OpenAI Agents SDK style):
 
@@ -125,9 +217,10 @@ lead agent ──delegate(agentId, task)──▶ child agent runs its own loop
 Depth is naturally bounded (delegation requires a team relationship), but a deep chain
 is still capped by the shared per-run step count.
 
-## 5. Live streaming (SSE)
+## 6. Live streaming (SSE)
 
-`POST /api/agents/:id/run` responds with `text/event-stream`:
+`POST /api/agents/:id/run` takes `{ input, sessionId? }` and responds with
+`text/event-stream`:
 
 ```
 data: {"type":"start","runId":"…"}
@@ -138,14 +231,20 @@ data: {"type":"message", …, "message":{"role":"assistant","content":"…"}}
 data: {"type":"done","runId":"…","output":"…"}
 ```
 
+- **One session per conversation.** `start.runId` identifies the session. The web client
+  keeps it and sends it back as `sessionId` on the next message, so the server answers in
+  the same `Run` — history, steps and the Runs-history row all continue instead of a new
+  session appearing per message. Concurrency is guarded (409 while the session is
+  answering) and an unknown id falls back to a fresh session; the agent page's
+  **New session** button forgets the id and starts over.
 - Events are also persisted into the `Run` record as they stream, so a crash mid-run
   still leaves a consistent history (final state is overwritten idempotently at the end).
 - The web client parses SSE frames manually from a `fetch` reader (no extra dependency),
   and aborts the request on "Stop".
 
-## 6. Integrations
+## 7. Integrations
 
-### 6.1 Google (OAuth2)
+### 7.1 Google (OAuth2)
 
 - **OAuth2 web-server flow**: `GET /api/google/auth-url?group=workspace|youtube` → consent →
   `GET /api/google/callback` (redirect URI `http://localhost:8787/api/google/callback`)
@@ -185,7 +284,7 @@ See `docs/research/google-integration.md` for the 2026-state quota model
 (Gmail 6 000 units/min/user, YouTube 100 `search.list`/day, etc.) and why tools
 instruct agents to search narrowly before fetching bodies.
 
-### 6.2 GitHub, Vercel, Supabase (API tokens)
+### 7.2 GitHub, Vercel, Supabase (API tokens)
 
 The three newer integrations are **token-based**: no OAuth dance, no redirect URIs,
 no credentials in the JSON DB. Each service has:
@@ -224,7 +323,97 @@ Notes:
   cancels and Supabase data changes/SQL, keeping the confirm-before-acting guarantee
   uniform across all four integrations.
 
-## 7. LLM provider layer
+## 8. Scheduled runs
+
+An agent can be given a **recurring job**: a cadence, a task, and the agent that should
+do it. The engine lives in this process (`schedules/scheduler.ts`), started in
+`index.ts` and stopped on shutdown — no browser needs to be open, and no external cron
+daemon has to know about the JSON store.
+
+```
+Schedules page ──▶ POST /api/schedules ──▶ store.schedules[]
+                                              │
+                        every SCHEDULER_TICK_SECONDS:
+                        due = enabled ∧ nextRunAt ≤ now ∧ not already running
+                                              │
+                              run = createRun(agent, task, createdBy, scheduleId)
+                                              │
+                              executeTurn(§4) ─┴─▶ the same Run history as a chat
+```
+
+**A schedule is not a session.** Every firing opens a *fresh* `Run` (titled after the
+task, tagged `scheduleId`, attributed to the account that created the schedule) with an
+opening `note` step — `scheduled run · Every weekday at 09:00` — so the history reads as
+a series of executions and shows why each one happened. Continuity between firings is
+what agent memory (`memory_set` / `memory_get`) is for.
+
+### 8.1 The cron engine (`schedules/cron.ts`)
+
+Dependency-free, five fields (`minute hour day-of-month month day-of-week`): `*`, values,
+ranges, steps (`*/15`, `8-18/2`, `5/20`), comma lists, month/weekday names and the
+`@hourly…@yearly` macros. Cron's day rule is honored — when both day fields are
+restricted, **either** may match. Times are evaluated in the **server's local time zone**:
+a self-hosted instance schedules against the clock of the machine it runs on.
+
+`nextRun` is a field-level search (month → day → hour → minute) with an eight-year
+horizon rather than a minute-by-minute scan, so `0 0 29 2 *` resolves instantly and
+`0 0 31 2 *` returns "never" instead of hanging. `describeCron` turns an expression into
+the label the console shows ("Every weekday at 09:00"), and falls back to
+`Custom · <expr>` rather than describe something it cannot simplify. The engine is the
+one part of the feature that could be silently wrong, so it is covered directly:
+`pnpm test` runs `cron.test.ts` through `node --test`.
+
+### 8.2 The tick loop
+
+| Rule | Why |
+| --- | --- |
+| One run per schedule at a time | A schedule whose previous run is still going is skipped, never stacked; the cadence is recomputed from the moment the run *finishes*, so a slow run cannot pile up a backlog. |
+| Missed occurrences are skipped, never replayed | `nextRunAt` is recomputed from *now* on boot: a machine that was off overnight does not wake up and fire a night of work, and a restart loop cannot multiply runs. |
+| Bounded concurrency (`SCHEDULE_MAX_CONCURRENCY`) | Work beyond the cap stays *due* and is picked up on a later tick — that is the backpressure keeping an unattended box (and the LLM bill) sane. |
+| Self-pause after N failures (`SCHEDULE_MAX_FAILURES`) | `failures` counts consecutive failures; at the cap the schedule disables itself and stores `pausedReason`. Editing it clears the counter and re-arms it. |
+| Interrupted runs are closed at boot | Nothing survives a restart, so any run still marked `running` is marked failed (`failInterruptedRuns`), and a schedule that was mid-run has its last status settled the same way — neither is left claiming to be running forever. |
+| Missing agent ⇒ paused | A schedule whose agent was deleted is parked with a reason (deleting an agent also deletes its schedules). |
+| Shutdown aborts in-flight runs | `scheduler.stop()` clears the interval and aborts the controllers before the store is flushed, so nothing writes after the final save. |
+
+Schedules are stored with a precomputed `nextRunAt`, which is what the console renders —
+it never has to re-derive a cadence, and the engine's notion of "next" and the UI's are
+the same value. `POST /api/schedules/preview` validates an expression *before* it is
+saved and returns its description plus the next few firing times.
+
+### 8.3 API and console
+
+```
+GET    /api/schedules          list (armed first, soonest to fire at the top)
+POST   /api/schedules          create { agentId, input, cron, name?, enabled? }
+GET    /api/schedules/:id      one schedule
+PUT    /api/schedules/:id      partial patch — the list flips `enabled` on its own
+DELETE /api/schedules/:id      remove
+POST   /api/schedules/:id/run  fire now → 202 { runId } (executes in the background)
+POST   /api/schedules/preview  { cron } → { valid, description, next[] }
+```
+
+Every route sits behind the same session gate as the rest of the API; the workspace is
+shared, so any signed-in account manages the schedules it can see and the creator is
+recorded (`createdBy`, shown as an email). **Run now** works on a paused schedule too —
+pressing it is an explicit decision and deliberately does *not* re-arm the cadence.
+
+The Schedules page (`web/src/pages/Schedules.tsx`) is a table of what is armed, with a
+live poll so "next run" counts down and engine-started runs appear without a refresh.
+The editor offers presets (*every N minutes, hourly, daily, weekdays, weekly, monthly*)
+that compile to a cron expression, plus a raw expression field; re-opening a schedule
+reverse-maps its stored expression back onto the controls, and anything not shaped like
+a preset opens in **Custom cron** intact rather than approximated. The dashboard lists
+what is about to fire, the run history tags every run a schedule started, and the agent
+run page links to that agent's schedules.
+
+| Variable | Meaning |
+| --- | --- |
+| `SCHEDULER_ENABLED` | `false` parks the engine: schedules stay stored and can still be run by hand, but never fire on their own. |
+| `SCHEDULER_TICK_SECONDS` | How often the engine looks for due work (default 20). |
+| `SCHEDULE_MAX_CONCURRENCY` | Scheduled runs in flight at once (default 2). |
+| `SCHEDULE_MAX_FAILURES` | Consecutive failures before the self-pause (default 5, `0` = never). |
+
+## 9. LLM provider layer
 
 `llm/openaiCompat.ts` speaks the OpenAI chat-completions wire format, so one client
 covers DeepSeek V4 (`deepseek-v4-pro` default), OpenAI, Gemini (`…/v1beta/openai/`),
@@ -240,7 +429,7 @@ OpenRouter and local vLLM:
 - Errors are normalized into friendly messages (missing key, HTTP status, bad payload).
 - `LLM_PROVIDER=mock` provides an offline brain for demos and smoke tests.
 
-## 8. Design principles (from the research)
+## 10. Design principles (from the research)
 
 1. **More agents ≠ better** — teams are small and intentional; delegation is explicit,
    not free-form agent chat.

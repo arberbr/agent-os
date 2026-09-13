@@ -5,6 +5,7 @@ import express from 'express';
 import { config, ensureDataDir } from './config.js';
 import { store } from './store.js';
 import { createApp } from './api/app.js';
+import { scheduler } from './schedules/scheduler.js';
 // Side-effect: registers all tools (built-in, Google, delegate).
 import './tools/index.js';
 
@@ -38,8 +39,15 @@ async function main(): Promise<void> {
     console.log(`[agent-os] Google: ${connected || 'not connected'}`);
   });
 
+  // Cron-style recurring runs. The engine lives in this process and works off
+  // the same JSON store; it arms every enabled schedule and ticks from here on.
+  scheduler.start();
+
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[agent-os] ${signal} received, shutting down…`);
+    // Stop firing (and abort in-flight scheduled runs) before the store is
+    // flushed, so nothing writes after the final save.
+    scheduler.stop();
     server.close(async () => {
       await store.flush();
       process.exit(0);

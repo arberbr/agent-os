@@ -58,6 +58,19 @@ function parseEnvList(value: string | undefined, fallback: string[]): string[] {
     .filter(Boolean);
 }
 
+/** A positive numeric env var, falling back when unset or unusable. */
+function positiveNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value ?? fallback);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Like `positiveNumber`, but kept inside a usable range. */
+function boundedNumber(value: string | undefined, fallback: number, min: number, max: number, allowZero = false): number {
+  const parsed = Number(value);
+  const usable = Number.isFinite(parsed) && (parsed > 0 || (allowZero && parsed === 0)) ? parsed : fallback;
+  return Math.min(Math.max(usable, min), max);
+}
+
 function parseExtraHeaders(value: string | undefined): Record<string, string> {
   if (!value) return {};
   try {
@@ -121,6 +134,19 @@ export interface Config {
   llmMock: boolean;
   agentMaxSteps: number;
   toolResultMaxChars: number;
+  /** Prior turns of a continued session replayed into the next request. */
+  conversationHistoryMaxChars: number;
+  /** Scheduled runs (cron-style recurring agent runs). */
+  scheduler: {
+    /** false = the engine never starts; schedules are stored but never fire. */
+    enabled: boolean;
+    /** How often the engine looks for work, in seconds. */
+    tickSeconds: number;
+    /** Scheduled runs allowed to execute at the same time. */
+    maxConcurrency: number;
+    /** Consecutive failures before a schedule pauses itself (0 = never). */
+    maxFailures: number;
+  };
   googleClientId: string;
   googleClientSecret: string;
   /** Per-group scope lists (identity scopes are added by the auth layer). */
@@ -166,6 +192,15 @@ function buildConfig(): Config {
     llmMock: (process.env.LLM_PROVIDER ?? '').toLowerCase() === 'mock',
     agentMaxSteps: Number(process.env.AGENT_MAX_STEPS ?? 12),
     toolResultMaxChars: Number(process.env.TOOL_RESULT_MAX_CHARS ?? 8000),
+    conversationHistoryMaxChars: positiveNumber(process.env.CONVERSATION_HISTORY_MAX_CHARS, 80_000),
+    scheduler: {
+      // `SCHEDULER_ENABLED=false` parks the engine without deleting anything.
+      enabled: (process.env.SCHEDULER_ENABLED ?? 'true').toLowerCase() !== 'false',
+      tickSeconds: boundedNumber(process.env.SCHEDULER_TICK_SECONDS, 20, 5, 3600),
+      maxConcurrency: boundedNumber(process.env.SCHEDULE_MAX_CONCURRENCY, 2, 1, 10),
+      // 0 disables the self-pause, so a flaky integration can be retried forever.
+      maxFailures: boundedNumber(process.env.SCHEDULE_MAX_FAILURES, 5, 0, 100, true),
+    },
     googleClientId,
     googleClientSecret,
     googleScopeGroups: resolveScopeGroups(),
@@ -180,6 +215,22 @@ function buildConfig(): Config {
 }
 
 export const config: Config = buildConfig();
+
+/**
+ * Browser origins allowed to call the API with credentials: the instance's own
+ * origin(s) plus the Vite dev server. Anything else is rejected, so a random
+ * page cannot ride the session cookie (see `sameOriginOnly` in auth.ts).
+ */
+export const allowedOrigins: string[] = [...new Set(
+  [
+    config.publicUrl,
+    ...(process.env.WEB_ORIGIN ?? '').split(',').map((origin) => origin.trim().replace(/\/+$/, '')),
+    `http://localhost:${config.port}`,
+    `http://127.0.0.1:${config.port}`,
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+  ].filter(Boolean),
+)];
 
 export function ensureDataDir(): void {
   fs.mkdirSync(config.dataDir, { recursive: true });

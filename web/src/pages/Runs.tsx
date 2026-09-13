@@ -2,12 +2,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearch } from '@tanstack/react-router';
 import { deleteRun, getRun, listAgents, listRuns } from '../api';
 import { Icon } from '../components/Icon';
-import { Markdown } from '../components/Markdown';
 import { ActivityStep } from '../components/app/activity-step';
 import { EmptyState } from '../components/app/empty-state';
 import { Page, PageDescription, PageHeadMain, PageHeader, PageTitle } from '../components/app/page';
 import { Panel, PanelContent, PanelHeader, PanelNote, PanelTitle } from '../components/app/panel';
 import { StateRail } from '../components/app/state';
+import { AssistantMessageView, UserMessageView } from '../components/chat/message-views';
+import { runTranscript } from '../components/chat/run-transcript';
 import { Alert, AlertDescription } from '../components/ui/alert';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -41,6 +42,20 @@ const FILTERS: Array<{ key: StatusFilter; label: string }> = [
 const backLink =
   'mb-2 inline-block text-[12.5px] font-medium text-muted-foreground transition-colors hover:text-primary';
 
+/** Stand-in speaker for a session whose agent has since been deleted. */
+const DELETED_AGENT: AgentDef = {
+  id: '',
+  name: 'Deleted agent',
+  description: '',
+  instructions: '',
+  model: '',
+  enabledTools: [],
+  teamAgentIds: [],
+  color: '#8f939c',
+  createdAt: '',
+  updatedAt: '',
+};
+
 /* ── One run, on its own screen ────────────────────────────────────────── */
 
 function RunScreen({
@@ -62,6 +77,12 @@ function RunScreen({
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const duration = run ? formatDuration(run.startedAt, run.finishedAt) : null;
+
+  // A session is the whole conversation: render every turn of it with the same
+  // components as the live chat, not just the answer to the last request.
+  const transcript = useMemo(() => (run ? runTranscript(run.messages) : []), [run]);
+  const turns = transcript.filter((message) => message.role === 'user').length;
+  const speaker = agent ?? DELETED_AGENT;
 
   if (loading) {
     return (
@@ -129,6 +150,11 @@ function RunScreen({
               <StateRail tone={statusTone(run.status)}>{statusLabel(run.status)}</StateRail>
             </span>
             <span className="border-l border-rule-2 px-2.5">{agent ? agent.name : 'Deleted agent'}</span>
+            {run.scheduleId && (
+              <span className="border-l border-rule-2 px-2.5">
+                scheduled{run.scheduleName ? ` · ${run.scheduleName}` : ''}
+              </span>
+            )}
             {duration && <span className="border-l border-rule-2 px-2.5">{duration}</span>}
             <span title={run.id} className="border-l border-rule-2 px-2.5 font-mono">
               run {run.id.slice(0, 8)}
@@ -183,19 +209,27 @@ function RunScreen({
           <Panel>
             <PanelHeader>
               <div className="flex items-baseline gap-2.5">
-                <PanelTitle>Output</PanelTitle>
-                <PanelNote>{plural(run.steps.length, 'step')}</PanelNote>
+                <PanelTitle>Conversation</PanelTitle>
+                <PanelNote>{turns > 0 ? plural(turns, 'turn') : 'no turns'}</PanelNote>
               </div>
             </PanelHeader>
             <PanelContent>
-              {run.output ? (
-                <Markdown>{run.output}</Markdown>
-              ) : (
+              {transcript.length === 0 ? (
                 <EmptyState
                   icon="file"
-                  title="No output recorded"
-                  description="This run finished without a final answer. Its steps are on the right."
+                  title="No transcript recorded"
+                  description="This session finished without any messages. Its steps are on the right."
                 />
+              ) : (
+                <div className="flex flex-col gap-6">
+                  {transcript.map((message) =>
+                    message.role === 'user' ? (
+                      <UserMessageView key={message.id} message={message} />
+                    ) : (
+                      <AssistantMessageView key={message.id} message={message} agent={speaker} />
+                    ),
+                  )}
+                </div>
               )}
             </PanelContent>
           </Panel>
@@ -427,6 +461,7 @@ export default function Runs() {
                     <TableHead>Status</TableHead>
                     <TableHead>Task</TableHead>
                     <TableHead>Agent</TableHead>
+                    <TableHead>By</TableHead>
                     <TableHead>Steps</TableHead>
                     <TableHead>Started</TableHead>
                     <TableHead className="w-0">
@@ -441,13 +476,29 @@ export default function Runs() {
                         <StateRail tone={statusTone(run.status)}>{statusLabel(run.status)}</StateRail>
                       </TableCell>
                       <TableCell className="font-medium">
-                        <Link
-                          to="/runs"
-                          search={{ status: search.status, run: run.id }}
-                          className="block max-w-[340px] truncate text-foreground hover:text-primary"
-                        >
-                          {run.title}
-                        </Link>
+                        <span className="flex items-center gap-2">
+                          <Link
+                            to="/runs"
+                            search={{ status: search.status, run: run.id }}
+                            className="block max-w-[340px] truncate text-foreground hover:text-primary"
+                          >
+                            {run.title}
+                          </Link>
+                          {run.scheduleId && (
+                            <Badge
+                              variant="outline"
+                              className="shrink-0 gap-1 border-rule text-mute"
+                              title={
+                                run.scheduleName
+                                  ? `Started by the "${run.scheduleName}" schedule`
+                                  : 'Started by a schedule that has since been deleted'
+                              }
+                            >
+                              <Icon name="clock" size={11} />
+                              <span className="max-w-[140px] truncate">{run.scheduleName ?? 'scheduled'}</span>
+                            </Badge>
+                          )}
+                        </span>
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         <span className="inline-flex items-center gap-2">
@@ -458,6 +509,15 @@ export default function Runs() {
                             </Badge>
                           )}
                         </span>
+                      </TableCell>
+                      <TableCell className="text-mute">
+                        {run.createdByEmail ? (
+                          <span className="max-w-[180px] truncate" title={run.createdByEmail}>
+                            {run.createdByEmail}
+                          </span>
+                        ) : (
+                          '—'
+                        )}
                       </TableCell>
                       <TableCell className="tabular-nums">{run.steps}</TableCell>
                       <TableCell className="tabular-nums text-mute" title={formatDateTime(run.startedAt)}>
@@ -494,7 +554,7 @@ export default function Runs() {
                   ))}
                   {visible.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
+                      <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
                         No runs match this filter.
                       </TableCell>
                     </TableRow>

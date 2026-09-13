@@ -1,6 +1,14 @@
 import type {
-  AgentDef, PublicConfig, RunDetail, RunSummary, GoogleStatus,
+  AgentDef, AdminStats, AppSettings, AuthState, PublicConfig, PublicUser, RunDetail, RunSummary,
+  GoogleStatus, Schedule, ScheduleInput, SchedulePreview, UserRole,
 } from './types';
+
+/**
+ * Fired whenever the server answers 401 — the session expired or was revoked.
+ * The auth provider listens for it and drops straight back to the login screen
+ * instead of leaving a half-dead console on screen.
+ */
+export const UNAUTHORIZED_EVENT = 'agentos:unauthorized';
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -8,6 +16,9 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (res.status === 204) return undefined as T;
+  // `window.Event` on purpose: this also has to work under jsdom (smoke test),
+  // where the bare `Event` global is Node's, not the one dispatchEvent accepts.
+  if (res.status === 401) window.dispatchEvent(new window.Event(UNAUTHORIZED_EVENT));
   const text = await res.text();
   const json = text ? (JSON.parse(text) as unknown) : undefined;
   if (!res.ok) {
@@ -16,6 +27,38 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return json as T;
 }
+
+/* ── Accounts ──────────────────────────────────────────────────────────── */
+
+export const getAuthState = () => api<AuthState>('/api/auth/state');
+export const login = (email: string, password: string) =>
+  api<{ user: PublicUser }>('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  });
+export const signup = (input: { email: string; password: string; name?: string }) =>
+  api<{ user: PublicUser }>('/api/auth/signup', { method: 'POST', body: JSON.stringify(input) });
+export const logout = () => api<{ ok: boolean }>('/api/auth/logout', { method: 'POST' });
+export const updateProfile = (input: { name?: string; currentPassword?: string; newPassword?: string }) =>
+  api<{ user: PublicUser }>('/api/auth/me', { method: 'PATCH', body: JSON.stringify(input) });
+
+/* ── Administration ────────────────────────────────────────────────────── */
+
+export const getSettings = () =>
+  api<{ settings: AppSettings; stats: AdminStats }>('/api/admin/settings');
+export const updateSettings = (patch: Partial<AppSettings>) =>
+  api<{ settings: AppSettings; stats: AdminStats }>('/api/admin/settings', {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+  });
+export const listUsers = () => api<PublicUser[]>('/api/admin/users');
+export const createUser = (input: { email: string; name?: string; password: string; role: UserRole }) =>
+  api<PublicUser>('/api/admin/users', { method: 'POST', body: JSON.stringify(input) });
+export const updateUser = (id: string, patch: { name?: string; role?: UserRole; password?: string }) =>
+  api<PublicUser>(`/api/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+export const deleteUser = (id: string) => api<void>(`/api/admin/users/${id}`, { method: 'DELETE' });
+
+/* ── Console data ──────────────────────────────────────────────────────── */
 
 export const getConfig = () => api<PublicConfig>('/api/config');
 export const listAgents = () => api<AgentDef[]>('/api/agents');
@@ -28,6 +71,25 @@ export const deleteAgent = (id: string) =>
 export const listRuns = (limit = 50) => api<RunSummary[]>(`/api/runs?limit=${limit}`);
 export const getRun = (id: string) => api<RunDetail>(`/api/runs/${id}`);
 export const deleteRun = (id: string) => api<void>(`/api/runs/${id}`, { method: 'DELETE' });
+
+/* ── Scheduled runs ────────────────────────────────────────────────────── */
+
+export const listSchedules = () => api<Schedule[]>('/api/schedules');
+export const getSchedule = (id: string) => api<Schedule>(`/api/schedules/${id}`);
+export const createSchedule = (input: ScheduleInput) =>
+  api<Schedule>('/api/schedules', { method: 'POST', body: JSON.stringify(input) });
+export const updateSchedule = (id: string, input: ScheduleInput) =>
+  api<Schedule>(`/api/schedules/${id}`, { method: 'PUT', body: JSON.stringify(input) });
+export const deleteSchedule = (id: string) => api<void>(`/api/schedules/${id}`, { method: 'DELETE' });
+/** Fire a schedule immediately; the run continues in the background. */
+export const runScheduleNow = (id: string) =>
+  api<{ runId: string; schedule: Schedule }>(`/api/schedules/${id}/run`, { method: 'POST' });
+/** Validate a cron expression and preview its next firing times. */
+export const previewSchedule = (cron: string, count = 3) =>
+  api<SchedulePreview>('/api/schedules/preview', {
+    method: 'POST',
+    body: JSON.stringify({ cron, count }),
+  });
 export const llmTest = (prompt?: string) =>
   api<{ ok: boolean; model?: string; reply?: string; ms?: number; error?: string }>('/api/llm/test', {
     method: 'POST',

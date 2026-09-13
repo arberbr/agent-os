@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { listAgents, listRuns } from '../api';
+import { listAgents, listRuns, listSchedules } from '../api';
 import { useConfig } from '../App';
 import { Icon } from '../components/Icon';
+import { Mark } from '../components/Mark';
 import { AgentRow } from '../components/app/agent-row';
 import { Page, PageActions, PageDescription, PageHeadMain, PageHeader, PageTitle } from '../components/app/page';
 import { Panel, PanelContent, PanelHeader, PanelNote, PanelTitle } from '../components/app/panel';
 import { Button } from '../components/ui/button';
-import { plural } from '../format';
+import { plural, timeUntil } from '../format';
 import { cn } from '@/lib/utils';
-import type { AgentDef, RunSummary } from '../types';
+import type { AgentDef, RunSummary, Schedule } from '../types';
 
 const HISTORY = 100;
 const DAY_MS = 86_400_000;
@@ -39,6 +40,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const [agents, setAgents] = useState<AgentDef[]>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -46,10 +48,12 @@ export default function Dashboard() {
     void Promise.all([
       listAgents().catch(() => [] as AgentDef[]),
       listRuns(HISTORY).catch(() => [] as RunSummary[]),
-    ]).then(([a, r]) => {
+      listSchedules().catch(() => [] as Schedule[]),
+    ]).then(([a, r, s]) => {
       if (!alive) return;
       setAgents(a);
       setRuns(r);
+      setSchedules(s);
       setLoading(false);
     });
     return () => { alive = false; };
@@ -62,6 +66,15 @@ export default function Dashboard() {
   const weekTotal = week.reduce((sum, day) => sum + day.count, 0);
   const weekMax = Math.max(1, ...week.map((day) => day.count));
   const googleConnected = Boolean(cfg?.google.connected);
+  // What is about to run on its own, soonest first.
+  const upcoming = useMemo(
+    () =>
+      schedules
+        .filter((schedule) => schedule.enabled && schedule.nextRunAt)
+        .sort((a, b) => String(a.nextRunAt).localeCompare(String(b.nextRunAt)))
+        .slice(0, 4),
+    [schedules],
+  );
 
   const cell = cn(
     'border-rule px-5 py-4',
@@ -228,6 +241,52 @@ export default function Dashboard() {
                     className="row flex items-center gap-3.5 border-t border-rule px-5 py-3 text-foreground transition-colors first:border-t-0 hover:bg-surface-2 hover:text-foreground"
                   >
                     <AgentRow agent={agent} />
+                  </Link>
+                ))}
+              </div>
+            </PanelContent>
+          </Panel>
+        )}
+
+        {upcoming.length > 0 && (
+          <Panel>
+            <PanelHeader>
+              <div className="flex items-baseline gap-2.5">
+                <PanelTitle>Scheduled runs</PanelTitle>
+                <PanelNote>
+                  {plural(schedules.length, 'schedule')} · {upcoming.length} about to fire
+                </PanelNote>
+              </div>
+              <Link
+                to="/schedules"
+                className="text-[12.5px] font-medium text-muted-foreground transition-colors hover:text-primary"
+              >
+                All schedules
+              </Link>
+            </PanelHeader>
+            <PanelContent flush>
+              <div>
+                {upcoming.map((schedule) => (
+                  <Link
+                    key={schedule.id}
+                    to="/schedules"
+                    className="flex items-center gap-3.5 border-t border-rule px-5 py-3 text-foreground transition-colors first:border-t-0 hover:bg-surface-2 hover:text-foreground"
+                  >
+                    <Mark name={schedule.agentName} color={schedule.agentColor} size="sm" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13.5px] font-medium">{schedule.label}</span>
+                      <span className="mt-0.5 block truncate text-[11.5px] text-mute">
+                        {schedule.agentName} · {schedule.description}
+                      </span>
+                    </span>
+                    <span
+                      className={cn(
+                        'shrink-0 text-[12.5px] tabular-nums',
+                        schedule.running ? 'text-primary' : 'text-muted-foreground',
+                      )}
+                    >
+                      {schedule.running ? 'running now' : timeUntil(schedule.nextRunAt)}
+                    </span>
                   </Link>
                 ))}
               </div>

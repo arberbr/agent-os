@@ -19,6 +19,8 @@ export interface RunAgentOptions {
   /** Stack of agent ids currently executing (cycle protection for teams). */
   teamStack?: string[];
   runId?: string;
+  /** Steps already recorded for this session, so a continued turn keeps one trace. */
+  steps?: RunStep[];
 }
 
 export interface RunAgentResult {
@@ -55,7 +57,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   const { agent, input, onEvent, signal } = opts;
   const runId = opts.runId ?? randomUUID();
   const teamStack = [...(opts.teamStack ?? []), agent.id];
-  const steps: RunStep[] = [];
+  const steps: RunStep[] = [...(opts.steps ?? [])];
   const messages: ChatMessage[] = [
     { role: 'system', content: buildSystemPrompt(agent) },
     ...(opts.history ?? []),

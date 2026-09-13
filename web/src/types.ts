@@ -11,6 +11,44 @@ export interface AgentDef {
   updatedAt: string;
 }
 
+/* ── Accounts & access ─────────────────────────────────────────────────── */
+
+export type UserRole = 'admin' | 'member';
+
+export interface PublicUser {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+/** What the login screen needs before anyone is signed in. */
+export interface AuthState {
+  authenticated: boolean;
+  user: PublicUser | null;
+  signupsEnabled: boolean;
+  /** True until the instance has its first account (which becomes the admin). */
+  needsSetup: boolean;
+  canSignup: boolean;
+  allowedSignupDomains: string[];
+  sessionDays: number;
+}
+
+export interface AppSettings {
+  signupsEnabled: boolean;
+  allowedSignupDomains: string[];
+  sessionDays: number;
+  runHistoryLimit: number;
+}
+
+export interface AdminStats {
+  users: number;
+  admins: number;
+  sessions: number;
+}
+
 export interface ToolInfo {
   name: string;
   description: string;
@@ -62,14 +100,71 @@ export interface PublicConfig {
   supabase: SupabaseStatus;
   tools: ToolInfo[];
   defaults: { maxSteps: number };
+  /** The schedule engine's knobs, so the console can warn when it is off. */
+  scheduler: SchedulerInfo;
 }
 
+export interface SchedulerInfo {
+  enabled: boolean;
+  tickSeconds: number;
+  maxConcurrency: number;
+  maxFailures: number;
+}
+
+/* ── Scheduled runs ────────────────────────────────────────────────────── */
+
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+/** A cron-style recurring run, as the console sees it. */
+export interface Schedule {
+  id: string;
+  agentId: string;
+  name: string;
+  input: string;
+  cron: string;
+  enabled: boolean;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastRunId: string | null;
+  lastStatus: RunStatus | null;
+  lastError: string | null;
+  runCount: number;
+  failures: number;
+  pausedReason: string | null;
+  /* Joined by the server for display. */
+  agentName: string;
+  agentColor: string;
+  label: string;
+  description: string;
+  createdByEmail: string | null;
+  running: boolean;
+}
+
+export interface ScheduleInput {
+  agentId?: string;
+  name?: string;
+  input?: string;
+  cron?: string;
+  enabled?: boolean;
+}
+
+export interface SchedulePreview {
+  valid: boolean;
+  error?: string;
+  cron: string;
+  description: string;
+  /** The next few firing times (ISO), empty when the cadence is invalid. */
+  next: string[];
+}
 
 export interface RunSummary {
   id: string;
   agentId: string;
   agentName: string;
+  createdByEmail: string | null;
   title: string;
   status: RunStatus;
   output: string | null;
@@ -77,6 +172,9 @@ export interface RunSummary {
   startedAt: string;
   finishedAt: string | null;
   steps: number;
+  /** Set when a schedule fired this run. */
+  scheduleId: string | null;
+  scheduleName: string | null;
 }
 
 export interface RunStep {
@@ -110,6 +208,9 @@ export interface RunDetail {
   error: string | null;
   startedAt: string;
   finishedAt: string | null;
+  /** Present when a schedule fired this run. */
+  scheduleId?: string | null;
+  scheduleName?: string | null;
 }
 
 export type RunEvent =

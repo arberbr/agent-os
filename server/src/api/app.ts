@@ -1,12 +1,16 @@
 import { randomBytes } from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
-import { config } from '../config.js';
+import { allowedOrigins, config } from '../config.js';
 import { store } from '../store.js';
-import type { AgentDef, RunEvent } from '../types.js';
+import { attachUser, requireAuth, sameOriginOnly } from '../auth.js';
+import { createAuthRouter } from './auth.js';
+import { createAdminRouter } from './admin.js';
+import { createScheduleRouter } from './schedules.js';
+import type { AgentDef, Run, RunEvent } from '../types.js';
 import { chatCompletion } from '../llm/openaiCompat.js';
 import { listTools } from '../tools/index.js';
-import { runAgent } from '../agents/runAgent.js';
+import { executeTurn } from '../agents/executeRun.js';
 import {
   buildAuthUrl, disconnectGoogle, googleStatus, handleAuthCode, isGoogleConfigured, getAuthedClient,
 } from '../google/auth.js';
@@ -26,8 +30,15 @@ import {
 
 export function createApp(): express.Express {
   const app = express();
-  app.use(cors());
+  // Credentials now travel in a session cookie, so the browser origin must be
+  // one this instance actually serves (see allowedOrigins in config.ts).
+  app.use(cors({
+    origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin.replace(/\/+$/, ''))),
+    credentials: true,
+  }));
   app.use(express.json({ limit: '2mb' }));
+  // Every request learns who it is; nothing is rejected here.
+  app.use(attachUser);
 
   /**
    * Live run streams, so removing a session that is still running actually
@@ -35,11 +46,23 @@ export function createApp(): express.Express {
    */
   const activeRuns = new Map<string, AbortController>();
 
-  // ── Health & public config ────────────────────────────────────────────
+  // ── Health & accounts (the only endpoints open to a signed-out browser) ─
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, time: new Date().toISOString() });
   });
+
+  app.use('/api/auth', createAuthRouter());
+
+  //  Everything past this line needs a signed-in account.
+  //  (The Google OAuth callback sits behind it too: it is a top-level
+  //  navigation, so the SameSite=Lax cookie is sent along.)
+  app.use('/api', sameOriginOnly, requireAuth);
+
+  app.use('/api/admin', createAdminRouter());
+  app.use('/api/schedules', createScheduleRouter());
+
+  // ── Public config ─────────────────────────────────────────────────────
 
   app.get('/api/config', (_req, res) => {
     const tools = listTools().map((t) => ({
@@ -65,6 +88,13 @@ export function createApp(): express.Express {
       supabase: supabaseStatus(),
       tools,
       defaults: { maxSteps: config.agentMaxSteps },
+      // The console shows a warning when the schedule engine is switched off.
+      scheduler: {
+        enabled: config.scheduler.enabled,
+        tickSeconds: config.scheduler.tickSeconds,
+        maxConcurrency: config.scheduler.maxConcurrency,
+        maxFailures: config.scheduler.maxFailures,
+      },
     });
   });
 
@@ -127,6 +157,7 @@ export function createApp(): express.Express {
       id: r.id,
       agentId: r.agentId,
       agentName: store.getAgent(r.agentId)?.name ?? 'deleted agent',
+      createdByEmail: r.createdBy ? store.getUser(r.createdBy)?.email ?? null : null,
       title: r.title,
       status: r.status,
       output: r.output,
@@ -134,13 +165,17 @@ export function createApp(): express.Express {
       startedAt: r.startedAt,
       finishedAt: r.finishedAt,
       steps: r.steps.length,
+      // Provenance for runs a schedule fired (the history shows it as a chip).
+      scheduleId: r.scheduleId ?? null,
+      scheduleName: r.scheduleId ? store.getSchedule(r.scheduleId)?.name ?? null : null,
     })));
   });
 
   app.get('/api/runs/:id', (req, res) => {
     const run = store.getRun(req.params.id);
     if (!run) return res.status(404).json({ error: 'Run not found.' });
-    res.json(run);
+    const schedule = run.scheduleId ? store.getSchedule(run.scheduleId) : undefined;
+    res.json({ ...run, scheduleName: schedule ? schedule.name.trim() || null : null });
   });
 
   /** Remove a session from the history. Aborts it first when it is live. */
@@ -152,16 +187,42 @@ export function createApp(): express.Express {
     res.status(204).end();
   });
 
-  /** Start an agent run and stream progress + final output as SSE. */
+  /**
+   * Answer one turn. The first turn of a conversation opens a session (one
+   * `Run`); every later turn posts that session's id back and is answered in
+   * the same record, with the transcript so far replayed to the model, so a
+   * chat keeps going instead of starting over on each message.
+   *
+   * The turn itself runs through `executeTurn` — the same engine the scheduler
+   * uses, so a watched run and an unattended one differ only in who is
+   * listening to the events.
+   */
   app.post('/api/agents/:id/run', async (req, res) => {
     const agent = store.getAgent(req.params.id);
     if (!agent) return res.status(404).json({ error: 'Agent not found.' });
 
-    const input = String((req.body as { input?: unknown } | undefined)?.input ?? '').trim();
+    const body = req.body as { input?: unknown; sessionId?: unknown } | undefined;
+    const input = String(body?.input ?? '').trim();
     if (!input) return res.status(400).json({ error: 'input is required.' });
 
-    const run = store.createRun(agent.id, input.slice(0, 100));
-    store.pruneRuns();
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
+    // An unknown id (session pruned or removed) starts a fresh session rather
+    // than failing the user's message; its `start` event carries the new id.
+    const existing = sessionId ? store.getRun(sessionId) : undefined;
+    if (existing && existing.agentId !== agent.id) {
+      return res.status(400).json({ error: 'That session belongs to a different agent.' });
+    }
+    if (existing && existing.status === 'running') {
+      return res.status(409).json({ error: 'That session is already answering a message.' });
+    }
+
+    const continuing = existing !== undefined;
+    const run: Run = existing ?? store.createRun(agent.id, input.slice(0, 100), req.user?.id ?? null);
+    if (continuing) {
+      store.updateRun(run.id, { status: 'running', error: null, finishedAt: null });
+    } else {
+      store.pruneRuns(store.getSettings().runHistoryLimit);
+    }
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -181,36 +242,17 @@ export function createApp(): express.Express {
     };
     send({ type: 'start', runId: run.id });
 
-    try {
-      const result = await runAgent({
-        agent,
-        input,
-        runId: run.id,
-        signal: ac.signal,
-        onEvent: (event) => {
-          send(event);
-          if (event.type === 'step') store.updateRun(run.id, { steps: [...(store.getRun(run.id)?.steps ?? []), event.step!] });
-          if (event.type === 'message' && event.message) store.updateRun(run.id, { messages: [...(store.getRun(run.id)?.messages ?? []), event.message] });
-        },
-      });
-      const cancelled = ac.signal.aborted;
-      store.updateRun(run.id, {
-        status: cancelled ? 'cancelled' : 'completed',
-        messages: result.messages,
-        steps: result.steps,
-        output: cancelled ? null : result.output,
-        finishedAt: new Date().toISOString(),
-      });
-      send({ type: 'done', runId: run.id, output: cancelled ? '' : result.output });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const cancelled = ac.signal.aborted;
-      store.updateRun(run.id, {
-        status: cancelled ? 'cancelled' : 'failed',
-        error: message,
-        finishedAt: new Date().toISOString(),
-      });
-      send({ type: 'error', runId: run.id, error: message });
+    const result = await executeTurn({
+      agent,
+      run,
+      input,
+      signal: ac.signal,
+      onEvent: send,
+    });
+    if (result.status === 'failed') {
+      send({ type: 'error', runId: run.id, error: result.error ?? 'Run failed.' });
+    } else {
+      send({ type: 'done', runId: run.id, output: result.output ?? '' });
     }
     activeRuns.delete(run.id);
     res.end();

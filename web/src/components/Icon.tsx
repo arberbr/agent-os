@@ -32,6 +32,7 @@ import { GithubLogo } from '@phosphor-icons/react/dist/icons/GithubLogo';
 import { Info } from '@phosphor-icons/react/dist/icons/Info';
 import { Key } from '@phosphor-icons/react/dist/icons/Key';
 import { Lightning } from '@phosphor-icons/react/dist/icons/Lightning';
+import { Lock } from '@phosphor-icons/react/dist/icons/Lock';
 import { MagnifyingGlass } from '@phosphor-icons/react/dist/icons/MagnifyingGlass';
 import { PaperPlaneTilt } from '@phosphor-icons/react/dist/icons/PaperPlaneTilt';
 import { PencilSimple } from '@phosphor-icons/react/dist/icons/PencilSimple';
@@ -41,11 +42,15 @@ import { Plus } from '@phosphor-icons/react/dist/icons/Plus';
 import { Pulse } from '@phosphor-icons/react/dist/icons/Pulse';
 import { Rocket } from '@phosphor-icons/react/dist/icons/Rocket';
 import { ShieldCheck } from '@phosphor-icons/react/dist/icons/ShieldCheck';
+import { SignIn } from '@phosphor-icons/react/dist/icons/SignIn';
+import { SignOut } from '@phosphor-icons/react/dist/icons/SignOut';
 import { Sparkle } from '@phosphor-icons/react/dist/icons/Sparkle';
 import { SquaresFour } from '@phosphor-icons/react/dist/icons/SquaresFour';
 import { Stack } from '@phosphor-icons/react/dist/icons/Stack';
 import { Stop } from '@phosphor-icons/react/dist/icons/Stop';
 import { Trash } from '@phosphor-icons/react/dist/icons/Trash';
+import { UserCircle } from '@phosphor-icons/react/dist/icons/UserCircle';
+import { UserPlus } from '@phosphor-icons/react/dist/icons/UserPlus';
 import { UsersThree } from '@phosphor-icons/react/dist/icons/UsersThree';
 import { Warning } from '@phosphor-icons/react/dist/icons/Warning';
 import { Wrench } from '@phosphor-icons/react/dist/icons/Wrench';
@@ -101,6 +106,11 @@ const GLYPHS = {
   download: DownloadSimple,
   key: Key,
   gear: Gear,
+  signIn: SignIn,
+  signOut: SignOut,
+  lock: Lock,
+  user: UserCircle,
+  userPlus: UserPlus,
 } satisfies Record<string, PhosphorIcon>;
 
 export type IconName = keyof typeof GLYPHS;

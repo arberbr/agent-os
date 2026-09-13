@@ -1,5 +1,6 @@
 import type { ChatTransport, UIMessage, UIMessageChunk } from 'ai';
 import { createUIMessageStream } from 'ai';
+import { UNAUTHORIZED_EVENT } from '@/api';
 import type { RunEvent } from '@/types';
 
 /**
@@ -16,6 +17,11 @@ import type { RunEvent } from '@/types';
  *     activity rail can render the full trace with timings,
  *   - the closing assistant message becomes a text part,
  *   - run metadata (runId) travels in `data-agent` parts.
+ *
+ * The run id of the first turn is also the *session*: it is sent back with
+ * every later message, so the server answers in the same record and replays the
+ * transcript to the model — one ongoing conversation instead of one run per
+ * message. `startNewSession()` forgets it, which is what "New session" does.
  *
  * Errors are intentionally NOT swallowed: when the run fails or the request
  * is aborted, the stream rejects and the AI SDK converts it into the proper
@@ -36,7 +42,15 @@ function messageText(message: UIMessage): string {
 }
 
 export class AgentChatTransport implements ChatTransport<UIMessage> {
+  /** Id of the session this conversation lives in; null until the first turn. */
+  private sessionId: string | null = null;
+
   constructor(private readonly agentId: string) {}
+
+  /** End the conversation: the next message opens a fresh session. */
+  startNewSession(): void {
+    this.sessionId = null;
+  }
 
   async sendMessages({
     messages,
@@ -44,9 +58,10 @@ export class AgentChatTransport implements ChatTransport<UIMessage> {
   }: Parameters<ChatTransport<UIMessage>['sendMessages']>[0]): Promise<ReadableStream<UIMessageChunk>> {
     const lastUser = [...messages].reverse().find((message) => message.role === 'user');
     const input = lastUser ? messageText(lastUser) : '';
+    const sessionId = this.sessionId;
 
     return createUIMessageStream({
-      execute: ({ writer }) => this.streamRun(input, writer, abortSignal),
+      execute: ({ writer }) => this.streamRun(input, sessionId, writer, abortSignal),
     });
   }
 
@@ -56,16 +71,20 @@ export class AgentChatTransport implements ChatTransport<UIMessage> {
 
   private async streamRun(
     input: string,
+    sessionId: string | null,
     writer: { write: (chunk: UIMessageChunk) => void },
     abortSignal: AbortSignal | undefined,
   ): Promise<void> {
     const res = await fetch(`/api/agents/${this.agentId}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input }),
+      body: JSON.stringify({ input, ...(sessionId ? { sessionId } : {}) }),
       signal: abortSignal,
     });
     if (!res.ok) {
+      // An expired session must send the console back to the login screen
+      // instead of surfacing as a failed turn in the chat.
+      if (res.status === 401) window.dispatchEvent(new window.Event(UNAUTHORIZED_EVENT));
       const text = await res.text().catch(() => '');
       throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
     }
@@ -84,6 +103,9 @@ export class AgentChatTransport implements ChatTransport<UIMessage> {
     await this.readEvents(res.body, (event: RunEvent) => {
       switch (event.type) {
         case 'start':
+          // The server owns session identity: adopt whatever id it answered
+          // with so the next message continues this conversation.
+          this.sessionId = event.runId;
           writer.write({ type: 'data-agent', data: { kind: 'start', runId: event.runId } });
           break;
 

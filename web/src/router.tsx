@@ -6,6 +6,8 @@ import AgentEditor from '@/pages/AgentEditor';
 import AgentRun from '@/pages/AgentRun';
 import Integrations from '@/pages/Integrations';
 import Runs from '@/pages/Runs';
+import Schedules from '@/pages/Schedules';
+import Settings from '@/pages/Settings';
 
 const rootRoute = createRootRoute({
   component: AppShell,
@@ -57,6 +59,12 @@ const runsRoute = createRoute({
   component: Runs,
 });
 
+const schedulesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/schedules',
+  component: Schedules,
+});
+
 const integrationsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/integrations',
@@ -69,6 +77,12 @@ const integrationsRoute = createRoute({
   component: Integrations,
 });
 
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/settings',
+  component: Settings,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   agentsRoute,
@@ -76,7 +90,9 @@ const routeTree = rootRoute.addChildren([
   agentDetailRoute,
   agentRunRoute,
   runsRoute,
+  schedulesRoute,
   integrationsRoute,
+  settingsRoute,
 ]);
 
 export const router = createRouter({

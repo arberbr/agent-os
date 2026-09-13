@@ -32,6 +32,33 @@ export function formatClock(iso: string): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+/** "Mon 14 Sep, 09:00" — for things that happen at a known moment ahead. */
+export function formatWeekdayDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, {
+    weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+/** The mirror of `timeAgo`, for what has not happened yet: "in 12m". */
+export function timeUntil(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return '—';
+  const at = new Date(iso).getTime();
+  if (Number.isNaN(at)) return '—';
+  const diff = at - now;
+  if (diff <= 0) return 'due now';
+  const min = Math.floor(diff / 60_000);
+  if (min < 1) return 'in under a minute';
+  if (min < 60) return `in ${min}m`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return `in ${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `in ${days}d`;
+  return `in ${Math.round(days / 7)}w`;
+}
+
 /** Duration between two ISO stamps, e.g. "12s" / "1m 04s". */
 export function formatDuration(startIso: string | null, endIso: string | null): string | null {
   if (!startIso || !endIso) return null;
