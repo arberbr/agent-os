@@ -2,8 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config, type ScopeGroup } from './config.js';
+import { normalizeMailSettings } from './mail/settings.js';
 import type {
-  AgentDef, AppSettings, DatabaseShape, GoogleToken, Run, Schedule, Session, User, UserRole,
+  AgentDef, AppSettings, DatabaseShape, GoogleToken, MailSettings, Run, Schedule, Session, User, UserRole,
 } from './types.js';
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -34,6 +35,25 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 const RUN_STATUSES = new Set(['running', 'completed', 'failed', 'cancelled']);
+const NOTIFY_MODES = new Set(['never', 'failure', 'success', 'always']);
+
+/** Coerce whatever was stored into a known notify mode (default: silent). */
+function normalizeNotifyOn(value: unknown): Schedule['notifyOn'] {
+  const raw = String(value ?? '');
+  return (NOTIFY_MODES.has(raw) ? raw : 'never') as Schedule['notifyOn'];
+}
+
+/** Recipients as stored: trimmed, de-duplicated, capped, no judgement on shape. */
+function normalizeNotifyEmails(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const entry of value) {
+    const email = String(entry ?? '').trim();
+    if (!email || out.some((existing) => existing.toLowerCase() === email.toLowerCase())) continue;
+    out.push(email);
+  }
+  return out.slice(0, 10);
+}
 
 /**
  * Coerce a stored schedule into a complete record. `db.json` is hand-editable,
@@ -65,6 +85,12 @@ export function normalizeSchedule(input: Partial<Schedule>): Schedule {
     runCount: count(input.runCount),
     failures: count(input.failures),
     pausedReason: input.pausedReason ?? null,
+    // Notifications: off for a schedule written before they existed, which is
+    // the safe default — nobody gets mail because they upgraded.
+    notifyOn: normalizeNotifyOn(input.notifyOn),
+    notifyEmails: normalizeNotifyEmails(input.notifyEmails),
+    lastNotifyAt: typeof input.lastNotifyAt === 'string' && input.lastNotifyAt ? input.lastNotifyAt : null,
+    lastNotifyError: input.lastNotifyError ?? null,
   };
 }
 
@@ -93,6 +119,7 @@ export class Store {
       sessions: [],
       settings: { ...DEFAULT_SETTINGS },
       googleTokens: { workspace: null, youtube: null },
+      mail: normalizeMailSettings(undefined),
       agentMemory: {},
     };
     try {
@@ -116,6 +143,9 @@ export class Store {
           workspace: stored?.workspace ?? parsed.googleToken ?? null,
           youtube: stored?.youtube ?? null,
         },
+        // SMTP credentials, normalized on read so a hand-edited or half-written
+        // record can never reach a transport. `.env` seeds keys nobody saved.
+        mail: normalizeMailSettings(parsed.mail),
         agentMemory: parsed.agentMemory && typeof parsed.agentMemory === 'object' ? parsed.agentMemory : {},
       };
     } catch {
@@ -453,6 +483,34 @@ export class Store {
   clearGoogleTokens(): void {
     this.data.googleTokens = { workspace: null, youtube: null };
     this.scheduleSave();
+  }
+
+  // ── Outgoing mail (SMTP) ──────────────────────────────────────────────
+
+  /**
+   * The SMTP relay settings. A copy on purpose: the sender fingerprints what it
+   * reads, and nothing outside the store should be able to mutate the record in
+   * place and bypass the save.
+   */
+  getMailSettings(): MailSettings {
+    return { ...this.data.mail };
+  }
+
+  updateMailSettings(patch: Partial<MailSettings>): MailSettings {
+    this.data.mail = normalizeMailSettings({
+      ...this.data.mail,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    });
+    this.scheduleSave();
+    return this.getMailSettings();
+  }
+
+  /** Forget the relay entirely (back to an unconfigured instance). */
+  clearMailSettings(): MailSettings {
+    this.data.mail = normalizeMailSettings({ updatedAt: new Date().toISOString() });
+    this.scheduleSave();
+    return this.getMailSettings();
   }
 
   // ── Agent memory ──────────────────────────────────────────────────────

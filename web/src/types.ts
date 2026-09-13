@@ -43,6 +43,41 @@ export interface AppSettings {
   runHistoryLimit: number;
 }
 
+/* ── Outgoing mail (SMTP) ──────────────────────────────────────────────── */
+
+export type MailSecurity = 'starttls' | 'tls' | 'none';
+
+/** The SMTP relay, as the console may see it — never the password itself. */
+export interface MailStatus {
+  configured: boolean;
+  enabled: boolean;
+  host: string;
+  port: number;
+  security: MailSecurity;
+  username: string;
+  fromName: string;
+  fromEmail: string;
+  replyTo: string;
+  verifyCertificate: boolean;
+  /** True when a password is on file; the field is then left blank to keep it. */
+  hasPassword: boolean;
+  updatedAt: string | null;
+}
+
+/** What the Settings form posts. `password` absent = leave the stored one. */
+export interface MailInput {
+  enabled?: boolean;
+  host?: string;
+  port?: number;
+  security?: MailSecurity;
+  username?: string;
+  password?: string;
+  fromName?: string;
+  fromEmail?: string;
+  replyTo?: string;
+  verifyCertificate?: boolean;
+}
+
 export interface AdminStats {
   users: number;
   admins: number;
@@ -100,8 +135,17 @@ export interface PublicConfig {
   supabase: SupabaseStatus;
   tools: ToolInfo[];
   defaults: { maxSteps: number };
+  /** Whether scheduled runs can be reported by email, and from where. */
+  mail: MailConfigInfo;
   /** The schedule engine's knobs, so the console can warn when it is off. */
   scheduler: SchedulerInfo;
+}
+
+export interface MailConfigInfo {
+  /** A relay is switched on, has a host and a sender address. */
+  configured: boolean;
+  /** The sender address notifications come from. */
+  from: string | null;
 }
 
 export interface SchedulerInfo {
@@ -114,6 +158,29 @@ export interface SchedulerInfo {
 /* ── Scheduled runs ────────────────────────────────────────────────────── */
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+/**
+ * When a schedule emails the outcome of a firing: never, only on failure, only
+ * on success, or on every run.
+ */
+export type ScheduleNotifyOn = 'never' | 'failure' | 'success' | 'always';
+
+export const NOTIFY_MODES: ScheduleNotifyOn[] = ['never', 'failure', 'success', 'always'];
+
+export const NOTIFY_LABELS: Record<ScheduleNotifyOn, string> = {
+  never: 'Never',
+  failure: 'On failure',
+  success: 'On success',
+  always: 'Every run',
+};
+
+/** One-line description of each mode, shown under the picker. */
+export const NOTIFY_NOTES: Record<ScheduleNotifyOn, string> = {
+  never: 'Silent — the run is only recorded in the history.',
+  failure: 'Email when a run fails or is cut short. The one you want on an unattended schedule.',
+  success: 'Email only when a run completes.',
+  always: 'Email after every run, whatever the outcome.',
+};
 
 /** A cron-style recurring run, as the console sees it. */
 export interface Schedule {
@@ -134,6 +201,12 @@ export interface Schedule {
   runCount: number;
   failures: number;
   pausedReason: string | null;
+  /** When this schedule emails its outcome. */
+  notifyOn: ScheduleNotifyOn;
+  /** Extra recipients; the account that created it is always included. */
+  notifyEmails: string[];
+  lastNotifyAt: string | null;
+  lastNotifyError: string | null;
   /* Joined by the server for display. */
   agentName: string;
   agentColor: string;
@@ -141,6 +214,10 @@ export interface Schedule {
   description: string;
   createdByEmail: string | null;
   running: boolean;
+  /** Everyone a notification would reach, creator included. */
+  notifyRecipients: string[];
+  /** Whether an SMTP relay is available at all right now. */
+  mailConfigured: boolean;
 }
 
 export interface ScheduleInput {
@@ -149,6 +226,8 @@ export interface ScheduleInput {
   input?: string;
   cron?: string;
   enabled?: boolean;
+  notifyOn?: ScheduleNotifyOn;
+  notifyEmails?: string[];
 }
 
 export interface SchedulePreview {

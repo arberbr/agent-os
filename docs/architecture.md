@@ -17,7 +17,7 @@ and [`docs/research/google-integration.md`](research/google-integration.md).
 │                                                                                │
 │  api/app.ts          REST routes, SSE run stream, OAuth callback, self-tests   │
 │  api/auth.ts         signup/login/logout/state, own-profile routes             │
-│  api/admin.ts        instance settings + user management (admin only)          │
+│  api/admin.ts        instance settings, SMTP relay, user management (admin)    │
 │  api/schedules.ts    recurring runs: CRUD, cadence preview, run-now            │
 │  auth.ts             scrypt hashes, session cookies, gate middleware, throttle │
 │  agents/executeRun.ts one turn end-to-end: context, loop, persistence          │
@@ -25,7 +25,11 @@ and [`docs/research/google-integration.md`](research/google-integration.md).
 │  agents/prompts.ts   system-prompt builder (persona + team roster + rules)     │
 │  agents/history.ts   session transcript → history prefix (budget + pairing)    │
 │  schedules/cron.ts   5-field cron: parse, validate, next firing, describe      │
-│  schedules/scheduler.ts  the tick loop: arm, fire, settle, pause               │
+│  schedules/scheduler.ts  the tick loop: arm, fire, settle, pause, notify       │
+│  mail/settings.ts    SMTP credentials: coercion, redaction, transport key      │
+│  mail/sender.ts      the only SMTP client: cached transport, verify, send      │
+│  mail/message.ts     who gets told, when, and what the email says              │
+│  mail/notify.ts      the hook: a settled firing → a delivered report           │
 │  tools/registry.ts   tool registry: {name, description, JSON schema, execute}  │
 │  tools/builtin.ts    now, memory_set, memory_get                               │
 │  tools/googleTools.ts  gmail_* calendar_* drive_* youtube_* (23 tools)         │
@@ -38,15 +42,16 @@ and [`docs/research/google-integration.md`](research/google-integration.md).
 │  github/client.ts    GitHub REST client (GITHUB_TOKEN from .env)               │
 │  vercel/client.ts    Vercel REST client (VERCEL_TOKEN, optional team)          │
 │  supabase/client.ts  PostgREST + management + storage + auth admin             │
-│  store.ts            JSON-file store: accounts, sessions, settings, agents,    │
-│                      runs, schedules, google tokens, agent memory              │
+│  store.ts            JSON-file store: accounts, sessions, settings, SMTP relay,│
+│                      agents, runs, schedules, google tokens, agent memory      │
 └──────────────────────────────────┬─────────────────────────────────────────────┘
                                    │
-                    ┌──────────────┴───────────────┐
-                    │ OpenAI-compatible LLM API    │  Google APIs (googleapis,
-                    │ (any provider / mock mode)   │  OAuth2 user tokens)
-│ GitHub · Vercel · Supabase   │  REST/PostgREST (fetch)
-                    └──────────────────────────────┘
+                    ┌──────────────┴───────────────────────────────────────────────┐
+                    │ OpenAI-compatible LLM API (any provider / mock mode)         │
+                    │ Google APIs (googleapis) — OAuth2 user tokens                │
+                    │ GitHub · Vercel · Supabase — REST / PostgREST (fetch)        │
+                    │ SMTP relay (nodemailer) — notification email for runs (§8.4) │
+                    └──────────────────────────────────────────────────────────────┘
 ```
 
 ## 2. Data model
@@ -73,6 +78,15 @@ AppSettings {                               // instance knobs, edited on the Set
   allowedSignupDomains: string[],           // [] = any domain
   sessionDays,                              // login lifetime
   runHistoryLimit                           // sessions kept before the oldest are pruned
+}
+
+MailSettings {                              // the SMTP relay, edited on the Settings page
+  enabled,                                  // master switch: false → nothing is ever sent
+  host, port, security,                     // security: 'starttls' | 'tls' | 'none'
+  username, password,                       // password is write-only: never sent to the browser
+  fromName, fromEmail, replyTo,             // fromEmail is also the envelope sender
+  verifyCertificate,                        // false accepts a self-signed internal relay
+  updatedAt                                 // set once saved; after that .env no longer seeds it
 }
 
 AgentDef {
@@ -104,7 +118,10 @@ Schedule {                                  // a recurring run: agent + task + c
   nextRunAt,                                // precomputed by the engine for the console
   lastRunAt, lastRunId, lastStatus, lastError,
   runCount, failures,                       // failures = consecutive, drives the self-pause
-  pausedReason                              // why the engine paused it (agent gone, failures)
+  pausedReason,                             // why the engine paused it (agent gone, failures)
+  notifyOn,                                 // never | failure | success | always (§8.4)
+  notifyEmails: string[],                   // extra recipients; the creator is always included
+  lastNotifyAt, lastNotifyError             // what the last notification did, and why not
 }
 
 GoogleToken { userId, email, name, picture, scopes, accessToken, refreshToken, expiryDate, connectedAt }
@@ -384,13 +401,23 @@ saved and returns its description plus the next few firing times.
 
 ```
 GET    /api/schedules          list (armed first, soonest to fire at the top)
-POST   /api/schedules          create { agentId, input, cron, name?, enabled? }
+POST   /api/schedules          create { agentId, input, cron, name?, enabled?,
+                                        notifyOn?, notifyEmails? }
 GET    /api/schedules/:id      one schedule
 PUT    /api/schedules/:id      partial patch — the list flips `enabled` on its own
 DELETE /api/schedules/:id      remove
 POST   /api/schedules/:id/run  fire now → 202 { runId } (executes in the background)
 POST   /api/schedules/preview  { cron } → { valid, description, next[] }
+
+GET    /api/admin/mail         relay status — never the password (admin only)
+PUT    /api/admin/mail         patch credentials; `password` absent = keep the stored one
+DELETE /api/admin/mail         forget the relay entirely
+POST   /api/admin/mail/test    { to? } → connect + authenticate; delivers when `to` is set
 ```
+
+Each schedule view is joined with `notifyRecipients` (everyone a notification would reach,
+creator included) and `mailConfigured`, so the editor can state what will happen instead of
+leaving the operator to guess.
 
 Every route sits behind the same session gate as the rest of the API; the workspace is
 shared, so any signed-in account manages the schedules it can see and the creator is
@@ -412,6 +439,72 @@ run page links to that agent's schedules.
 | `SCHEDULER_TICK_SECONDS` | How often the engine looks for due work (default 20). |
 | `SCHEDULE_MAX_CONCURRENCY` | Scheduled runs in flight at once (default 2). |
 | `SCHEDULE_MAX_FAILURES` | Consecutive failures before the self-pause (default 5, `0` = never). |
+
+### 8.4 Email notifications
+
+An unattended schedule is only useful if you find out what it did. A schedule can therefore
+ask to be **emailed its outcome**: `never` (the default, so upgrading sends nobody anything),
+`failure` (failed *or* cancelled — a run cut short by a restart is exactly the silent outcome
+worth an email), `success`, or `always`.
+
+```
+fire → executeTurn(§4) → settle(schedule)   ── the record is written first
+                              │
+                              ├─ in-flight slot released
+                              │
+                              └─ notifyScheduleOutcome()   ← after the schedule is free
+                                     ├─ notifyOn says nobody cares   → 'off' / 'not-due'
+                                     ├─ no relay configured          → recorded on the schedule
+                                     ├─ no recipients                 → recorded on the schedule
+                                     └─ mailSender.send()            → lastNotifyAt, or lastNotifyError
+```
+
+**Ordering is the design.** The notification runs *after* `settle()` and *after* the
+in-flight slot is released, so a slow or unreachable relay can never make a firing look busy,
+delay the next one, or change what happened. `notifyScheduleOutcome` returns a value for
+every outcome — sent, skipped, refused — and never throws: the two states an operator would
+want to fix (no relay, nobody to write to) are written to `lastNotifyError` and shown in the
+console, and a mail failure can never fail a run or contribute to the self-pause.
+
+**Who gets it.** The account that created the schedule, plus any addresses on
+`notifyEmails` — additions, not replacements. Addresses are validated and de-duplicated on
+the way in and again on the way out; a schedule with no creator and no addresses is a
+recorded skip rather than a bounce. Notifications cover **Run now** as well as cadence
+firings, and the email says which it was.
+
+**The content** (`mail/message.ts`, pure and unit-tested) is a report, not a ping: schedule,
+agent, cadence, trigger, start, duration, steps, the task, then the output — or the error,
+with any partial output labelled as such — and a link back to the run. Output is capped at
+4000 characters so a chatty agent cannot mail a novel. It ships as `multipart/alternative`,
+and it is deliberately **light-themed**: the console is a dark instrument, but a run report
+lands in mail clients that force-invert dark backgrounds, so the email keeps the family
+resemblance through structure and the same accent/state colours on a warm stone page.
+Everything interpolated is HTML-escaped, which is what stops an agent-written task from
+injecting markup into your inbox.
+
+**The relay** (`mail/sender.ts`) is the only place the server speaks SMTP — nodemailer, which
+has no dependencies of its own. It caches one transport and rebuilds it only when the
+connection-relevant settings change (compared by fingerprint), so saving the Settings page
+takes effect on the next message rather than at the next restart. Connect, greeting and
+socket timeouts are set explicitly (10 s / 10 s / 60 s) because waiting on a dead relay must
+not wedge a scheduled run. `security: 'starttls'` sets `requireTLS`, so credentials are never
+offered over a plaintext connection; failures are mapped from `EAUTH`/`ECONNECTION`/TLS codes
+into sentences that say what to change.
+
+Credentials are entered by an **administrator** on the Settings page. They live in `db.json`
+next to the Google refresh token — `SMTP_HOST` and friends in `.env` seed an unsaved record
+for headless setups, but once the pane has been saved the database is authoritative. The
+password is write-only: the API returns only `hasPassword`, and the console posts it only
+when the field has actually been touched, which is what makes "leave it blank to keep it"
+true rather than a polite lie that wipes a working credential on every unrelated save.
+
+`pnpm test` covers the pure parts directly (the due/not-due matrix, recipient resolution,
+escaping, truncation, coercion and redaction) and drives the sender against a **real SMTP
+conversation** — a listener on `127.0.0.1` that authenticates, takes an envelope and accepts
+DATA — including PLAIN and LOGIN, bad credentials, a refused recipient and a dead port. A
+running instance can be checked end to end with `node .smoke/verify-notifications.mjs
+<base-url>`, which enters credentials through the admin API and asserts the resulting email
+decodes the way a mail client would.
 
 ## 9. LLM provider layer
 

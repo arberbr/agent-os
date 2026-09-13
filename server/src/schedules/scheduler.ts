@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { store } from '../store.js';
 import type { Run, RunStatus, Schedule } from '../types.js';
 import { executeTurn } from '../agents/executeRun.js';
+import { notifyScheduleOutcome } from '../mail/notify.js';
 import { describeCron, nextRun } from './cron.js';
 
 export type ScheduleTrigger = 'schedule' | 'manual';
@@ -23,7 +24,11 @@ export type ScheduleTrigger = 'schedule' | 'manual';
  *  - **bounded concurrency** (`SCHEDULE_MAX_CONCURRENCY`) — work beyond the cap
  *    stays due and is picked up on a later tick, which is the backpressure;
  *  - **a schedule that keeps failing pauses itself** (`SCHEDULE_MAX_FAILURES`)
- *    with the reason recorded, instead of burning API credit in a loop.
+ *    with the reason recorded, instead of burning API credit in a loop;
+ *  - **the outcome can be emailed** — a schedule may ask to be reported on
+ *    failure, on success, or on every run (`notifyOn`). The report goes out
+ *    after the record is settled and the schedule is free again, so a slow mail
+ *    relay can never make a firing look busy or change what happened.
  */
 export class Scheduler {
   private timer: NodeJS.Timeout | null = null;
@@ -218,13 +223,29 @@ export class Scheduler {
         ? `manual run from "${label}" · ${describeCron(schedule.cron)}`
         : `scheduled run · ${describeCron(schedule.cron)}`;
 
-    void this.execute(schedule, run, controller, note);
+    void this.execute(schedule, run, controller, note, trigger);
     return run;
   }
 
-  /** The background half of a firing: run the agent, then settle the record. */
-  private async execute(schedule: Schedule, run: Run, controller: AbortController, note: string): Promise<void> {
+  /**
+   * The background half of a firing: run the agent, settle the record, then
+   * report it.
+   *
+   * The order matters. The record is settled and the in-flight slot is released
+   * *before* the notification goes out, so a slow or unreachable mail relay can
+   * never keep a schedule looking busy — and a mail failure can never change a
+   * run's outcome.
+   */
+  private async execute(
+    schedule: Schedule,
+    run: Run,
+    controller: AbortController,
+    note: string,
+    trigger: ScheduleTrigger,
+  ): Promise<void> {
     const agent = store.getAgent(schedule.agentId);
+    let status: RunStatus;
+    let error: string | null;
     try {
       if (!agent) throw new Error('The agent for this schedule no longer exists.');
       const result = await executeTurn({
@@ -234,26 +255,42 @@ export class Scheduler {
         signal: controller.signal,
         note,
       });
-      this.settle(schedule, result.status, result.error);
+      status = result.status;
+      error = result.error;
       console.log(`[scheduler] "${schedule.name || agent.name}" → ${result.status} (run ${run.id.slice(0, 8)})`);
     } catch (err) {
       // executeTurn records a failed run itself, so reaching this means the
       // firing broke before that was possible (a missing agent, a store error).
-      const message = err instanceof Error ? err.message : String(err);
-      this.settle(schedule, 'failed', message);
-      console.error(`[scheduler] "${schedule.name}" failed:`, message);
+      status = 'failed';
+      error = err instanceof Error ? err.message : String(err);
+      console.error(`[scheduler] "${schedule.name}" failed:`, error);
     } finally {
       this.inFlight.delete(schedule.id);
       this.controllers.delete(run.id);
+    }
+
+    const settled = this.settle(schedule, status, error);
+
+    if (settled) {
+      // Never throws: `notifyScheduleOutcome` reports every failure as a value
+      // and records it on the schedule.
+      await notifyScheduleOutcome({
+        schedule: settled,
+        run: store.getRun(run.id) ?? run,
+        agentName: store.getAgent(schedule.agentId)?.name ?? 'deleted agent',
+        status,
+        error,
+        trigger,
+      });
     }
   }
 
   /**
    * Write the outcome of a firing onto the schedule: the last-run fields, the
    * consecutive-failure counter, and either the next firing or the self-pause
-   * that ends the cadence.
+   * that ends the cadence. Returns the settled record.
    */
-  private settle(schedule: Schedule, status: RunStatus, error: string | null): void {
+  private settle(schedule: Schedule, status: RunStatus, error: string | null): Schedule | undefined {
     const current = store.getSchedule(schedule.id) ?? schedule;
     const failed = status === 'failed';
     const failures = failed ? current.failures + 1 : 0;
@@ -269,7 +306,7 @@ export class Scheduler {
       // queue up the occurrences it missed.
       patch.nextRunAt = this.computeNext(current).at;
     }
-    store.updateSchedule(schedule.id, patch);
+    return store.updateSchedule(schedule.id, patch);
   }
 }
 

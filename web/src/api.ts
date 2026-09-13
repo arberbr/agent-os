@@ -1,6 +1,6 @@
 import type {
   AgentDef, AdminStats, AppSettings, AuthState, PublicConfig, PublicUser, RunDetail, RunSummary,
-  GoogleStatus, Schedule, ScheduleInput, SchedulePreview, UserRole,
+  GoogleStatus, MailInput, MailStatus, Schedule, ScheduleInput, SchedulePreview, UserRole,
 } from './types';
 
 /**
@@ -57,6 +57,20 @@ export const createUser = (input: { email: string; name?: string; password: stri
 export const updateUser = (id: string, patch: { name?: string; role?: UserRole; password?: string }) =>
   api<PublicUser>(`/api/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
 export const deleteUser = (id: string) => api<void>(`/api/admin/users/${id}`, { method: 'DELETE' });
+
+/* ── Email notifications (admins) ──────────────────────────────────────── */
+
+export const getMail = () => api<{ mail: MailStatus }>('/api/admin/mail');
+/** Omitting `password` keeps the stored one; an empty string clears it. */
+export const updateMail = (patch: MailInput) =>
+  api<{ mail: MailStatus }>('/api/admin/mail', { method: 'PUT', body: JSON.stringify(patch) });
+export const clearMail = () => api<{ mail: MailStatus }>('/api/admin/mail', { method: 'DELETE' });
+/** Open the connection and authenticate; with `to`, also deliver a real test. */
+export const testMail = (to?: string) =>
+  api<{ ok: boolean; to: string | null; checks: Record<string, { ok: boolean; sample?: unknown; error?: string }> }>(
+    '/api/admin/mail/test',
+    { method: 'POST', body: JSON.stringify({ to }) },
+  );
 
 /* ── Console data ──────────────────────────────────────────────────────── */
 

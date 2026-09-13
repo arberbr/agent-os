@@ -77,7 +77,75 @@ export interface AppSettings {
   runHistoryLimit: number;
 }
 
+// ── Outgoing mail (SMTP) ────────────────────────────────────────────────
+
+/**
+ * How the SMTP connection is protected.
+ *  - `starttls` — plaintext connect, then upgrade (port 587, the common case);
+ *  - `tls`      — TLS from the first byte, implicit TLS (port 465);
+ *  - `none`     — no encryption at all (port 25; only sane on a trusted LAN).
+ */
+export type MailSecurity = 'starttls' | 'tls' | 'none';
+
+/**
+ * The SMTP relay Agents OS sends notifications through, entered by an admin on
+ * the Settings page and stored in the JSON database next to everything else.
+ *
+ * `password` is a live secret: it is never returned to the browser (the API
+ * redacts it to a `hasPassword` flag) and never reaches the model provider.
+ */
+export interface MailSettings {
+  /** Master switch: when false nothing is ever sent, whatever a schedule asks for. */
+  enabled: boolean;
+  host: string;
+  port: number;
+  security: MailSecurity;
+  username: string;
+  /** SMTP password / API key. Write-only from the console's point of view. */
+  password: string;
+  /** Display name on the From header (falls back to the sender address). */
+  fromName: string;
+  /** Sender address. Also the envelope sender. */
+  fromEmail: string;
+  /** Optional Reply-To. */
+  replyTo: string;
+  /**
+   * true  → a self-signed or otherwise untrusted certificate fails the send;
+   * false → accept it (internal relays). Defaults to true.
+   */
+  verifyCertificate: boolean;
+  /** When the credentials were last written from the console. */
+  updatedAt: string | null;
+}
+
+/** What the console may see about the SMTP setup — never the password. */
+export interface MailStatus {
+  /** Enabled *and* usable (host + sender address present). */
+  configured: boolean;
+  enabled: boolean;
+  host: string;
+  port: number;
+  security: MailSecurity;
+  username: string;
+  fromName: string;
+  fromEmail: string;
+  replyTo: string;
+  verifyCertificate: boolean;
+  /** True when a password is on file — the console shows "leave blank to keep". */
+  hasPassword: boolean;
+  updatedAt: string | null;
+}
+
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+/**
+ * When a schedule emails the outcome of a firing:
+ *  - `never`   — silent; notifications stay off (the default for a new schedule);
+ *  - `failure` — only runs that failed or were cancelled (the "tell me when it breaks" case);
+ *  - `success` — only runs that completed;
+ *  - `always`  — every firing, whatever the outcome.
+ */
+export type ScheduleNotifyOn = 'never' | 'failure' | 'success' | 'always';
 
 export type RunStepKind = 'llm' | 'tool_call' | 'tool_result' | 'delegate' | 'note';
 
@@ -141,6 +209,18 @@ export interface Schedule {
   failures: number;
   /** Why the scheduler paused it (agent deleted, repeated failures). */
   pausedReason: string | null;
+  /** When to email about a firing (see ScheduleNotifyOn). */
+  notifyOn: ScheduleNotifyOn;
+  /**
+   * Extra recipients. The account that created the schedule is always notified
+   * as well; this list only adds people (or overrides it when there is no
+   * creator, e.g. a schedule stored before accounts existed).
+   */
+  notifyEmails: string[];
+  /** When the last notification was handed to the relay. */
+  lastNotifyAt: string | null;
+  /** Why the last notification could not be sent (null = it went out, or none was due). */
+  lastNotifyError: string | null;
 }
 
 export interface GoogleToken {
@@ -181,6 +261,12 @@ export interface DatabaseShape {
   googleTokens: { workspace: GoogleToken | null; youtube: GoogleToken | null };
   /** Legacy single-token field, migrated into googleTokens.workspace on load. */
   googleToken?: GoogleToken | null;
+  /**
+   * The SMTP relay used for scheduled-run notifications, entered by an admin on
+   * the Settings page. Holds a credential, so `db.json` deserves the same care
+   * as the Google refresh token.
+   */
+  mail: MailSettings;
   /** Per-agent long-term memory: agentId -> key -> value */
   agentMemory: Record<string, Record<string, string>>;
 }

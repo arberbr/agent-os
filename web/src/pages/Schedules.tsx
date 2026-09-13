@@ -11,6 +11,7 @@ import { EmptyState } from '../components/app/empty-state';
 import { Field } from '../components/app/field';
 import { Page, PageActions, PageDescription, PageHeadMain, PageHeader, PageTitle } from '../components/app/page';
 import { Panel, PanelContent, PanelHeader, PanelNote, PanelTitle } from '../components/app/panel';
+import { SignalChip } from '../components/app/chips';
 import { StateRail } from '../components/app/state';
 import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert';
 import { Button } from '../components/ui/button';
@@ -21,7 +22,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Textarea } from '../components/ui/textarea';
 import { formatDateTime, formatWeekdayDateTime, plural, statusLabel, timeAgo, timeUntil } from '../format';
 import { cn } from '@/lib/utils';
-import type { AgentDef, Schedule, SchedulePreview } from '../types';
+import type { AgentDef, Schedule, ScheduleNotifyOn, SchedulePreview } from '../types';
+import { NOTIFY_LABELS, NOTIFY_MODES, NOTIFY_NOTES } from '../types';
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 /** The console re-reads the list on this beat so "next run" and "running" stay live. */
@@ -147,11 +149,14 @@ function cadenceFromCron(cron: string, fallback: Cadence): Cadence {
 function ScheduleEditor({
   agents,
   editing,
+  mailConfigured,
   onClose,
   onSaved,
 }: {
   agents: AgentDef[];
   editing: Schedule | null;
+  /** Whether an SMTP relay is available, so the notify picker can explain itself. */
+  mailConfigured: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -163,6 +168,8 @@ function ScheduleEditor({
     editing ? cadenceFromCron(editing.cron, DEFAULT_CADENCE) : DEFAULT_CADENCE,
   );
   const [enabled, setEnabled] = useState(editing?.enabled ?? true);
+  const [notifyOn, setNotifyOn] = useState<ScheduleNotifyOn>(editing?.notifyOn ?? 'never');
+  const [notifyEmails, setNotifyEmails] = useState((editing?.notifyEmails ?? []).join(', '));
   const [preview, setPreview] = useState<SchedulePreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -206,7 +213,11 @@ function ScheduleEditor({
     }
     setSaving(true);
     try {
-      const payload = { agentId, name, input, cron, enabled };
+      const recipients = notifyEmails
+        .split(',')
+        .map((email) => email.trim())
+        .filter(Boolean);
+      const payload = { agentId, name, input, cron, enabled, notifyOn, notifyEmails: recipients };
       if (editing) await updateSchedule(editing.id, payload);
       else await createSchedule(payload);
       onSaved();
@@ -457,6 +468,74 @@ function ScheduleEditor({
               </label>
             </Field>
 
+            <Field label="Notify by email" hint="after a run finishes">
+              <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Email notifications">
+                {NOTIFY_MODES.map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="radio"
+                    aria-checked={notifyOn === mode}
+                    onClick={() => setNotifyOn(mode)}
+                    className={cn(
+                      'h-8 cursor-pointer rounded-full border border-border bg-card px-3 text-[12.5px] font-medium text-muted-foreground transition-colors duration-150',
+                      'hover:bg-surface-2 hover:text-foreground',
+                      'aria-checked:border-primary aria-checked:bg-primary aria-checked:font-semibold aria-checked:text-primary-foreground',
+                    )}
+                  >
+                    {NOTIFY_LABELS[mode]}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 mb-0 text-[11.5px] text-mute">{NOTIFY_NOTES[notifyOn]}</p>
+            </Field>
+
+            {notifyOn !== 'never' && (
+              <Field
+                label="Also send to"
+                hint="optional, comma separated"
+                htmlFor="schedule-notify-emails"
+              >
+                <Input
+                  id="schedule-notify-emails"
+                  value={notifyEmails}
+                  onChange={(e) => setNotifyEmails(e.target.value)}
+                  placeholder="team@example.com, oncall@example.com"
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+                <span className="mt-1.5 block text-[11.5px] text-mute">
+                  {editing
+                    ? editing.createdByEmail
+                      ? `${editing.createdByEmail} is always notified. `
+                      : editing.notifyRecipients.length > 0
+                        ? 'This schedule has no creator account, so only the addresses above are notified. '
+                        : 'No creator account and no addresses — nobody would be notified. '
+                    : 'You are always notified. '}
+                  Runs started by hand (<em>Run now</em>) are reported too.
+                </span>
+              </Field>
+            )}
+
+            {notifyOn !== 'never' && !mailConfigured && (
+              <Alert variant="warning" className="mb-[18px]">
+                <Icon name="alert" size={14} />
+                <AlertTitle>No email relay is set up yet</AlertTitle>
+                <AlertDescription>
+                  An administrator can add SMTP credentials under <strong>Settings → Email notifications</strong>.
+                  Until then this schedule will not be able to report anything.
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {editing?.lastNotifyError && notifyOn !== 'never' && (
+              <Alert variant="warning" className="mb-[18px]">
+                <Icon name="alert" size={14} />
+                <AlertTitle>The last notification did not go out</AlertTitle>
+                <AlertDescription>{editing.lastNotifyError}</AlertDescription>
+              </Alert>
+            )}
+
             {editing && !knownAgent && (
               <Alert variant="warning" className="mb-[18px]">
                 <Icon name="alert" size={14} />
@@ -464,7 +543,6 @@ function ScheduleEditor({
                 <AlertDescription>Pick another agent above and save to revive it.</AlertDescription>
               </Alert>
             )}
-
             {error && (
               <Alert variant="destructive" className="mb-[18px]">
                 <Icon name="alert" size={14} />
@@ -596,6 +674,11 @@ export default function Schedules() {
   };
 
   const schedulerOff = cfg !== null && !cfg.scheduler.enabled;
+  /** Whether scheduled runs can be reported by email at all. */
+  const mailConfigured = cfg?.mail.configured ?? false;
+  /** How many schedules want an email that cannot currently be sent. */
+  const notifyWithoutRelay =
+    cfg !== null && !mailConfigured ? schedules.filter((s) => s.notifyOn !== 'never').length : 0;
 
   return (
     <Page>
@@ -630,8 +713,7 @@ export default function Schedules() {
           </Alert>
         )}
 
-        {agents.length === 0 && !loading && (
-          <Alert variant="info">
+        {agents.length === 0 && !loading && (          <Alert variant="info">
             <Icon name="info" size={14} />
             <AlertTitle>No agents to schedule yet</AlertTitle>
             <AlertDescription className="flex flex-wrap items-center gap-2">
@@ -643,10 +725,22 @@ export default function Schedules() {
           </Alert>
         )}
 
+        {notifyWithoutRelay && (
+          <Alert variant="warning">
+            <Icon name="alert" size={14} />
+            <AlertTitle>{plural(notifyWithoutRelay, 'schedule')} asked for email but no relay is set up</AlertTitle>
+            <AlertDescription>
+              Add SMTP credentials under <strong>Settings → Email notifications</strong> to start receiving them.
+              The runs themselves are unaffected.
+            </AlertDescription>
+          </Alert>
+        )}
+
         {editorOpen && (
           <ScheduleEditor
             agents={agents}
             editing={editing}
+            mailConfigured={mailConfigured}
             onClose={() => {
               setEditorOpen(false);
               setEditing(null);
@@ -758,6 +852,29 @@ export default function Schedules() {
                           <span className="mt-0.5 block truncate text-[11.5px] text-mute" title={schedule.input}>
                             {schedule.input}
                           </span>
+                          {schedule.notifyOn !== 'never' && (
+                            <span
+                              className="mt-1.5 inline-flex"
+                              title={
+                                schedule.notifyRecipients.length > 0
+                                  ? `Emails ${schedule.notifyRecipients.join(', ')} — ${NOTIFY_NOTES[schedule.notifyOn]}`
+                                  : NOTIFY_NOTES[schedule.notifyOn]
+                              }
+                            >
+                              <SignalChip className="gap-1">
+                                <Icon name="mail" size={11} />
+                                {NOTIFY_LABELS[schedule.notifyOn]}
+                              </SignalChip>
+                            </span>
+                          )}
+                          {schedule.notifyOn !== 'never' && schedule.lastNotifyError && (
+                            <span
+                              className="mt-1 block text-[11.5px] text-warning"
+                              title={schedule.lastNotifyError}
+                            >
+                              Notification failed: {schedule.lastNotifyError}
+                            </span>
+                          )}
                           {schedule.pausedReason && (
                             <span className="mt-1 block text-[11.5px] text-warning" title={schedule.pausedReason}>
                               {schedule.pausedReason}
@@ -883,6 +1000,9 @@ export default function Schedules() {
               Fired runs appear in <Link to="/runs" className="font-medium">Runs</Link> tagged with the schedule
               that started them. A schedule that fails {cfg?.scheduler.maxFailures ?? 5} times in a row pauses
               itself rather than retrying forever.
+              {mailConfigured
+                ? ' Schedules set to notify email their outcome once the run has been recorded.'
+                : ' Set a schedule to notify and its outcome is emailed — once a relay is configured in Settings.'}
             </div>
           </Panel>
         )}

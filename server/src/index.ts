@@ -5,6 +5,7 @@ import express from 'express';
 import { config, ensureDataDir } from './config.js';
 import { store } from './store.js';
 import { createApp } from './api/app.js';
+import { mailSender } from './mail/sender.js';
 import { scheduler } from './schedules/scheduler.js';
 // Side-effect: registers all tools (built-in, Google, delegate).
 import './tools/index.js';
@@ -37,6 +38,14 @@ async function main(): Promise<void> {
       .map(([group, t]) => `${group} (${t?.email})`)
       .join(', ');
     console.log(`[agent-os] Google: ${connected || 'not connected'}`);
+    const mail = mailSender.status();
+    console.log(
+      `[agent-os] mail: ${mail.configured
+        ? `${mail.host}:${mail.port} (${mail.security}) as ${mail.fromEmail}`
+        : mail.enabled
+          ? 'switched on but incomplete — finish it in Settings'
+          : 'not configured (Settings → Email notifications)'}`,
+    );
   });
 
   // Cron-style recurring runs. The engine lives in this process and works off

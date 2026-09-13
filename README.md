@@ -28,11 +28,11 @@ Agents OS is a small, dependency-light platform (TypeScript, Node + React, JSON-
   - Upload files to Storage buckets, create auth users via the admin API
 - **Live run view** — chat with an agent while a real-time **activity rail** streams every LLM step, tool call, argument and result (SSE). The conversation continues in **one session**: each new message is answered with the whole transcript so far in context, so you can follow up ("now save that to a Google Sheet") without repeating yourself. **New session** starts a fresh one.
 - **Scheduled runs** — give an agent a recurring job: pick the agent, write the task, choose a cadence (*every N minutes, hourly, daily, weekdays, weekly, monthly*, or a raw cron expression). The engine runs inside the server — no browser open — and every firing is an ordinary session in the run history, tagged with the schedule that started it. Schedules can be paused, fired on demand (**Run now**), and one that keeps failing pauses itself instead of retrying forever. See [Scheduled runs](docs/architecture.md#8-scheduled-runs).
+- **Email notifications** — point a schedule at your own SMTP relay and it emails you the outcome: **on failure** (the default choice for anything unattended), on success, or after every run. Add extra recipients alongside yourself, and get a proper report — agent, cadence, duration, steps, the task, the output or the error, and a link back to the run. Credentials are entered by an admin under **Settings → Email notifications** (host, port, STARTTLS/TLS/none, username, password, From, Reply-To) and tested with one click; the password is write-only and never leaves the server. See [Email notifications](docs/architecture.md#84-email-notifications).
 - **Run history** — every session persisted (messages, steps, output) and inspectable: opening one from the history replays the whole conversation, turn by turn, not just the last request.
 - **Guardrails** — max steps per run, tool-result truncation, 3-strikes tool-failure abort, cancellation, and confirm-before-destructive-action instructions baked into every system prompt.
 - **Persistent agent memory** — `memory_set` / `memory_get` tools survive across runs.
 - **Accounts & access control** — the console is behind an email + password **login** (sign in or create an account). The **first account on a fresh instance becomes the administrator** automatically; from **Settings** an admin can turn signups on/off, restrict them to email domains, set session length and history retention, add people directly, change roles and reset passwords. Sessions are HttpOnly cookies (scrypt password hashes, no plaintext), and every session is attributable — the run history shows who started each session.
-
 ## Quickstart
 
 ```bash
@@ -49,7 +49,9 @@ pnpm dev
 Open **http://localhost:5173**. On the first visit you get the login screen: **create the first account** — it becomes the administrator, and the Settings page is now yours (signups, people, sessions). Nothing else to configure: accounts live in the same JSON database as everything else.
 
 ```bash
-pnpm test    # unit tests for the cron engine the scheduler runs on (node --test)
+pnpm test    # unit tests for the cron engine the scheduler runs on, plus the mail
+             # layer: notification due/not-due, recipients, escaping, SMTP settings
+             # coercion, and the sender driven against a real local SMTP conversation
 ```
 
 ### Production-style single process
@@ -79,6 +81,8 @@ pnpm start      # server on :8787 also serves the built UI → http://localhost:
 | `SCHEDULER_TICK_SECONDS` | How often the engine looks for due work (default 20, 5–3600). |
 | `SCHEDULE_MAX_CONCURRENCY` | Scheduled runs executing at the same time (default 2, 1–10); work beyond the cap waits for a later tick. |
 | `SCHEDULE_MAX_FAILURES` | Consecutive failures before a schedule pauses itself with the reason recorded (default 5, `0` = never). |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` | Optional bootstrap for **email notifications** (see below). Once an admin saves the Settings pane, the stored record is authoritative. |
+| `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_FROM_NAME` / `SMTP_REPLY_TO` / `SMTP_VERIFY_CERT` / `SMTP_ENABLED` | The rest of the `.env` bootstrap. `SMTP_VERIFY_CERT=false` accepts a self-signed internal relay. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth client credentials (see below). |
 | `GOOGLE_SCOPES_WORKSPACE` | Scopes for Gmail + Calendar + Drive (default: `calendar.events`, `gmail.modify`, `drive.file`, `documents`, `spreadsheets`). |
 | `GOOGLE_SCOPES_YOUTUBE` | Scopes for YouTube (default: `youtube.readonly`, `youtube.upload`). Granted in a **separate** consent step — see below. |
@@ -140,6 +144,36 @@ These three use plain API tokens in `.env` — no OAuth consent, no redirect URI
 Each panel on the Integrations page has a **Test connection** button that pings the service live and shows
 which checks passed (identity, key validity, reachability).
 
+### Email notifications (5 minutes)
+
+Scheduled runs can email you their outcome. Everything is configured in the console — no
+`.env` edits, no restart: sign in as an administrator, open **Settings → Email
+notifications**, and fill in the relay.
+
+1. **Host and port** — your provider's SMTP submission endpoint (`smtp.example.com`, port 587
+   for STARTTLS or 465 for TLS). Moving between encryption modes carries the conventional
+   port with it, so you rarely have to think about it.
+2. **Username and password** — most providers (Gmail, Fastmail, Zoho, SendGrid, Postmark…)
+   require an **app-specific password** here rather than your account password. Leave the
+   field blank to keep whatever is already saved; the stored password is never sent back to
+   the browser.
+3. **From address** — the sender your relay accepts, e.g. `agents@example.com`. This is also
+   the envelope sender, so it must be an address your provider will let you send as.
+4. Hit **Test connection**. Leave *Send a test to* empty to only open and authenticate the
+   connection, or put your own address in it to deliver a real message and prove the whole
+   path.
+5. Then open **Schedules**, edit a schedule, and set **Notify by email** to *On failure*.
+
+A schedule notifies the account that created it, plus any extra addresses you list. Selections
+are refused rather than stored when no relay is configured, and the Schedules page says so
+plainly if a schedule is asking for email it cannot send. Run now is reported too.
+
+`SMTP_*` variables in `.env` can seed the relay for a headless setup (`SMTP_HOST`,
+`SMTP_PORT`, `SMTP_SECURE=starttls|tls|none`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`,
+`SMTP_FROM_NAME`, `SMTP_REPLY_TO`, `SMTP_VERIFY_CERT`, `SMTP_ENABLED`), but the moment an
+admin saves the Settings pane the database wins — so a value you clear in the console stays
+cleared.
+
 ## Creating your first team
 
 1. **Agents → New agent.** Example members:
@@ -177,6 +211,8 @@ POST /api/auth/login                 sign in (rate-limited)
 POST /api/auth/logout                end this session
 PATCH /api/auth/me                   own name / password change
 GET/PUT /api/admin/settings          instance settings (signups, domains, sessions, history)
+GET/PUT/DELETE /api/admin/mail       SMTP relay for notifications (password never returned)
+POST /api/admin/mail/test            connect + authenticate, and deliver a test message
 GET/POST /api/admin/users            list / create accounts
 PATCH/DELETE /api/admin/users/:id    role, name, password reset / remove account
 GET  /api/config                     public config, tool catalog, connection status
@@ -185,7 +221,7 @@ GET/PUT/DELETE /api/agents/:id
 POST /api/agents/:id/run             answer a turn: { input, sessionId? } → SSE stream
 GET  /api/runs?limit=50              session history (summaries, with the account that started it)
 GET  /api/runs/:id                   full session (messages + steps)
-GET/POST /api/schedules              list / create recurring runs (agent + task + cron)
+GET/POST /api/schedules              list / create recurring runs (agent + task + cron + notify)
 GET/PUT/DELETE /api/schedules/:id    read / edit / remove one schedule (PUT takes partial patches)
 POST /api/schedules/:id/run          fire it now (202 + runId; runs in the background)
 POST /api/schedules/preview          validate a cron expression → description + next firing times
@@ -209,7 +245,7 @@ POST /api/llm/test                   ping the configured LLM
 - Passwords are stored as **scrypt** hashes with a per-account salt; a session cookie only ever carries a random token whose sha-256 is what the database holds. The cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` when `PUBLIC_URL` is https.
 - Logins are throttled (8 failures / 10 min per email + IP); failed logins cost the same time whether or not the email exists.
 - State-changing API calls from a foreign origin are refused, and CORS only allows `PUBLIC_URL` + `WEB_ORIGIN` with credentials.
-- All data lives in a local JSON file (`server/data/db.json`), including the Google refresh token — protect the machine and file.
+- All data lives in a local JSON file (`server/data/db.json`), including the Google refresh token and — once you configure notifications — your SMTP password. Protect the machine and the file; the SMTP password is never returned by the API (only a "one is saved" flag), and it is never sent to the model provider.
 - Tokens refresh silently and are persisted on the `tokens` event; a revoked grant surfaces as a friendly "reconnect Google" error.
 - GitHub, Vercel and Supabase credentials live only in `.env` and are never persisted to the database or sent to the LLM provider.
 - The agent system prompt instructs agents to **confirm before** sending or deleting email, deleting events/files, sharing files, publishing YouTube videos, opening issues/PRs, writing to GitHub, redeploying/cancelling Vercel deployments, or changing Supabase data.
@@ -224,6 +260,7 @@ agent-os/
 │       ├── agents/       # system prompts, tool-calling loop, delegation, session history
 │       ├── api/          # REST + SSE routes, account routes, admin routes, schedule routes
 │       ├── schedules/    # cron engine (parse/next-run/describe) + the tick loop
+│       ├── mail/         # SMTP relay: settings, sender, notification message, the hook
 │       ├── auth.ts       # password hashing, session cookies, middleware, throttling
 │       ├── google/       # OAuth2 + gmail/calendar/drive/youtube modules
 │       ├── github/       # REST client (repos, issues, pulls, contents)
@@ -236,6 +273,19 @@ agent-os/
 └── docs/            # architecture + web research
 ```
 
+## Verifying an instance
+
+```bash
+pnpm test                                   # unit + integration tests (node --test)
+cd web && BASE=http://localhost:8787 node --conditions=browser smoke.mjs
+node .smoke/verify-notifications.mjs http://localhost:8787   # SMTP → delivered email, end to end
+```
+
+The smoke audit walks every route, runs a live agent chat and checks the API; the
+notification verifier stands up a real SMTP listener, enters credentials through the admin
+API exactly as the Settings page does, fires a schedule and asserts the resulting email
+decodes the way a mail client would see it.
+
 ## Roadmap ideas
 
 - Approval workflow (human confirms destructive tool calls in-UI)
@@ -244,4 +294,4 @@ agent-os/
 - Vercel create-deployment (artifact upload) for non-git projects
 - Multi-user accounts & per-user credentials
 - Structured outputs + agent-visible artifacts panel
-- Schedule notifications (email/Slack on a failed or finished scheduled run)
+- Slack / webhook notifications alongside email

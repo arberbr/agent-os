@@ -13,12 +13,14 @@
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "googleapis": "^178.1.1"
+    "googleapis": "^178.1.1",
+    "nodemailer": "^10.0.9"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^22.20.2",
+    "@types/nodemailer": "^8.0.1",
     "tsx": "^4.23.13",
     "typescript": "^6.0.3"
   }

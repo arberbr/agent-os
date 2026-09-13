@@ -27,6 +27,7 @@ import {
 import {
   makeSupabaseClient, supabaseAdminPing, supabaseHealth, supabaseProjectInfo, supabaseStatus,
 } from '../supabase/client.js';
+import { mailSender } from '../mail/sender.js';
 
 export function createApp(): express.Express {
   const app = express();
@@ -88,6 +89,13 @@ export function createApp(): express.Express {
       supabase: supabaseStatus(),
       tools,
       defaults: { maxSteps: config.agentMaxSteps },
+      // Just enough for the console to offer (or grey out) notifications and to
+      // point at Settings when they are not set up. The relay's address and
+      // username stay in the admin-only mail panel.
+      mail: {
+        configured: mailSender.isConfigured(),
+        from: store.getMailSettings().fromEmail || null,
+      },
       // The console shows a warning when the schedule engine is switched off.
       scheduler: {
         enabled: config.scheduler.enabled,

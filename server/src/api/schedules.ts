@@ -2,7 +2,9 @@ import express from 'express';
 import { store } from '../store.js';
 import { scheduler } from '../schedules/scheduler.js';
 import { describeCron, nextRun, nextRuns, validateCron } from '../schedules/cron.js';
-import type { Schedule } from '../types.js';
+import { cleanNotifyEmails, isNotifyMode } from '../mail/message.js';
+import { mailSender } from '../mail/sender.js';
+import type { Schedule, ScheduleNotifyOn } from '../types.js';
 
 /** The shape the console renders — a schedule joined to what it needs to show. */
 function scheduleView(schedule: Schedule) {
@@ -18,7 +20,22 @@ function scheduleView(schedule: Schedule) {
     createdByEmail: schedule.createdBy ? store.getUser(schedule.createdBy)?.email ?? null : null,
     /** True while this schedule's run is executing right now. */
     running: scheduler.runningIds().includes(schedule.id),
+    /**
+     * Who a notification would reach (the creator plus any extra addresses),
+     * and whether the relay is even switched on — so the editor can say what
+     * will happen instead of leaving the operator to guess.
+     */
+    notifyRecipients: schedule.notifyOn === 'never'
+      ? []
+      : resolvedRecipients(schedule),
+    mailConfigured: mailSender.isConfigured(),
   };
+}
+
+/** The creator's address plus the schedule's own list, as the sender would use it. */
+function resolvedRecipients(schedule: Schedule): string[] {
+  const creator = schedule.createdBy ? store.getUser(schedule.createdBy)?.email ?? null : null;
+  return [...new Set([creator, ...(schedule.notifyEmails ?? [])].filter((email): email is string => Boolean(email)))];
 }
 
 /** Longest task text accepted from the console (a brief, not a document). */
@@ -30,6 +47,8 @@ interface SchedulePatch {
   input?: string;
   cron?: string;
   enabled?: boolean;
+  notifyOn?: ScheduleNotifyOn;
+  notifyEmails?: string[];
 }
 
 /**
@@ -62,6 +81,22 @@ function readSchedulePatch(body: Record<string, unknown>): SchedulePatch {
   if (body.enabled !== undefined) {
     if (typeof body.enabled !== 'boolean') throw new Error('"enabled" must be true or false.');
     patch.enabled = body.enabled;
+  }
+  if (body.notifyOn !== undefined) {
+    if (!isNotifyMode(body.notifyOn)) {
+      throw new Error('"notifyOn" must be one of: never, failure, success, always.');
+    }
+    if (body.notifyOn !== 'never' && !mailSender.isConfigured()) {
+      // Storing it would be a promise the server cannot keep. Refusing here is
+      // how the operator finds out now rather than after a silent 3am failure.
+      throw new Error('Email notifications need an SMTP relay — an administrator can add one in Settings.');
+    }
+    patch.notifyOn = body.notifyOn;
+  }
+  if (body.notifyEmails !== undefined) {
+    const emails = cleanNotifyEmails(body.notifyEmails);
+    if (emails === null) throw new Error('Recipients must be valid email addresses, separated by commas.');
+    patch.notifyEmails = emails;
   }
   return patch;
 }
@@ -144,6 +179,10 @@ export function createScheduleRouter(): express.Router {
         runCount: 0,
         failures: 0,
         pausedReason: null,
+        notifyOn: patch.notifyOn ?? 'never',
+        notifyEmails: patch.notifyEmails ?? [],
+        lastNotifyAt: null,
+        lastNotifyError: null,
       });
       res.status(201).json(scheduleView(schedule));
     } catch (err) {
@@ -172,11 +211,15 @@ export function createScheduleRouter(): express.Router {
       // Editing a schedule is an explicit fresh start: whatever paused it —
       // repeated failures, a deleted agent that is back — no longer applies.
       const redefined = patch.input !== undefined || patch.cron !== undefined || patch.agentId !== undefined;
+      // Re-saving the notification settings is likewise a fresh start for the
+      // "could not send" note, which is usually what the edit was fixing.
+      const notifyTouched = patch.notifyOn !== undefined || patch.notifyEmails !== undefined;
       const updated = store.updateSchedule(existing.id, {
         ...patch,
         failures: 0,
         pausedReason: null,
         lastError: redefined ? null : existing.lastError,
+        lastNotifyError: notifyTouched ? null : existing.lastNotifyError,
       });
       if (!updated) return res.status(404).json({ error: 'Schedule not found.' });
       const refreshed = scheduler.refresh(updated.id) ?? updated;

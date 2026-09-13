@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import type { MailSecurity, MailSettings } from './types.js';
 
 /**
  * Google scopes are split into groups because Google refuses to combine
@@ -88,6 +89,63 @@ function parseExtraHeaders(value: string | undefined): Record<string, string> {
   return {};
 }
 
+/** `true`/`false`/`1`/`0`/`yes`/`no` → boolean, else null (unset or unusable). */
+function parseBool(value: string | undefined): boolean | null {
+  const raw = (value ?? '').trim().toLowerCase();
+  if (!raw) return null;
+  if (['true', '1', 'yes', 'on'].includes(raw)) return true;
+  if (['false', '0', 'no', 'off'].includes(raw)) return false;
+  return null;
+}
+
+/**
+ * `SMTP_SECURE` accepts either the nodemailer-style boolean (`true` = implicit
+ * TLS on 465, `false` = STARTTLS on 587) or an explicit mode name, because
+ * providers document the two conventions interchangeably.
+ */
+function parseMailSecurity(value: string | undefined): MailSecurity | null {
+  const raw = (value ?? '').trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === 'true' || raw === 'tls' || raw === 'ssl' || raw === 'implicit') return 'tls';
+  if (raw === 'false' || raw === 'starttls' || raw === 'plain' || raw === 'opportunistic') return 'starttls';
+  if (raw === 'none' || raw === 'off' || raw === 'insecure') return 'none';
+  return null;
+}
+
+/**
+ * Optional SMTP bootstrap from `.env`.
+ *
+ * The Settings page is the normal way to configure the relay — it is stored in
+ * the JSON database so it can be changed without a restart. These variables
+ * exist for the headless case (seed a relay before the first sign-in, or keep
+ * credentials entirely out of `db.json`); once an admin saves the pane, the
+ * stored record wins and these are only read for keys nobody has saved yet.
+ */
+function resolveMailEnv(): Partial<MailSettings> {
+  const env: Partial<MailSettings> = {};
+  const host = (process.env.SMTP_HOST ?? '').trim();
+  const fromEmail = (process.env.SMTP_FROM ?? '').trim();
+  const security = parseMailSecurity(process.env.SMTP_SECURE);
+  const verify = parseBool(process.env.SMTP_VERIFY_CERT);
+  const enabled = parseBool(process.env.SMTP_ENABLED);
+  const port = Number(process.env.SMTP_PORT);
+
+  if (host) env.host = host;
+  if (Number.isFinite(port) && port > 0) env.port = Math.round(port);
+  if (security) env.security = security;
+  if (process.env.SMTP_USER !== undefined) env.username = process.env.SMTP_USER.trim();
+  if (process.env.SMTP_PASSWORD !== undefined) env.password = process.env.SMTP_PASSWORD;
+  if (process.env.SMTP_FROM_NAME !== undefined) env.fromName = process.env.SMTP_FROM_NAME.trim();
+  if (fromEmail) env.fromEmail = fromEmail;
+  if (process.env.SMTP_REPLY_TO !== undefined) env.replyTo = process.env.SMTP_REPLY_TO.trim();
+  if (verify !== null) env.verifyCertificate = verify;
+  // A host and a sender address are enough to be usable, so their presence
+  // arms the relay unless the operator explicitly said otherwise.
+  if (enabled !== null) env.enabled = enabled;
+  else if (host && fromEmail) env.enabled = true;
+  return env;
+}
+
 const serverDir = path.dirname(fileURLToPath(import.meta.url));
 
 /**
@@ -124,6 +182,11 @@ loadDotEnv();
 export interface Config {
   port: number;
   publicUrl: string;
+  /**
+   * Where the console is reachable, used for the links inside notification
+   * emails. `WEB_ORIGIN` (first entry) in dev, else `PUBLIC_URL`.
+   */
+  consoleUrl: string;
   dataDir: string;
   llmBaseUrl: string;
   llmApiKey: string;
@@ -164,6 +227,8 @@ export interface Config {
   supabaseServiceRoleKey: string;
   /** Optional Supabase management-API personal access token (SQL, table listing). */
   supabaseAccessToken: string;
+  /** SMTP bootstrap from `.env`; the Settings page takes over once an admin saves. */
+  mailEnv: Partial<MailSettings>;
 }
 
 function buildConfig(): Config {
@@ -171,8 +236,7 @@ function buildConfig(): Config {
   const publicUrl = (process.env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/+$/, '');
   const dataDir = path.resolve(serverDir, '..', process.env.DATA_DIR ?? './data');
   const googleClientId = process.env.GOOGLE_CLIENT_ID ?? '';
-  const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET ?? '';
-  const thinkingModeRaw = (process.env.LLM_THINKING_MODE ?? '').toLowerCase();
+  const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET ?? '';  const thinkingModeRaw = (process.env.LLM_THINKING_MODE ?? '').toLowerCase();
   const llmThinkingMode = thinkingModeRaw === 'enabled' || thinkingModeRaw === 'disabled'
     ? thinkingModeRaw
     : thinkingModeRaw
@@ -182,6 +246,7 @@ function buildConfig(): Config {
   return {
     port,
     publicUrl,
+    consoleUrl: (process.env.WEB_ORIGIN ?? '').split(',')[0]?.trim().replace(/\/+$/, '') || publicUrl,
     dataDir,
     llmBaseUrl: (process.env.LLM_BASE_URL ?? 'https://api.deepseek.com/v1').replace(/\/+$/, ''),
     llmApiKey: process.env.LLM_API_KEY ?? '',
@@ -211,6 +276,7 @@ function buildConfig(): Config {
     supabaseProjectRef: (process.env.SUPABASE_PROJECT_REF ?? '').trim().replace(/\/+$/, ''),
     supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ?? '',
     supabaseAccessToken: process.env.SUPABASE_ACCESS_TOKEN?.trim() ?? '',
+    mailEnv: resolveMailEnv(),
   };
 }
 

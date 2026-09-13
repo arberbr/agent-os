@@ -173,8 +173,23 @@ async function auditEndpoints() {
   // Admin routes answer 403 for a member, which is also a valid audit result.
   await checkEndpoint('GET', '/api/admin/users', { status: [200, 403], label: 'admin users' });
   await checkEndpoint('GET', '/api/admin/settings', { status: [200, 403], label: 'admin settings' });
+  await checkEndpoint('GET', '/api/admin/mail', { status: [200, 403], label: 'admin mail settings' });
 
   const config = JSON.parse((await checkEndpoint('GET', '/api/config', { label: 'config' })).text);
+  if (typeof config?.mail?.configured !== 'boolean') {
+    throw new Error('the public config must report whether email notifications are available');
+  }
+  // Only probe the relay when there is none: with one configured this would
+  // send a real message to the sender address.
+  if (!config.mail.configured) {
+    await checkEndpoint('POST', '/api/admin/mail/test', {
+      status: [200, 403, 502],
+      label: 'mail test (nothing configured)',
+    });
+  } else {
+    console.log('skip [api POST /api/admin/mail/test] (relay configured; not sending a real email)');
+  }
+
   await checkEndpoint('GET', '/api/agents', { label: 'list agents' });
   const created = JSON.parse(
     (await checkEndpoint('POST', '/api/agents', {
@@ -240,6 +255,37 @@ async function auditEndpoints() {
     body: { enabled: true, cron: '*/30 * * * *' },
     label: 'resume schedule',
   });
+
+  // Notification preferences: a bad recipient is always refused, and asking for
+  // mail without a relay is refused too (rather than stored as a promise the
+  // server cannot keep).
+  await checkEndpoint('PUT', `/api/schedules/${schedule.id}`, {
+    body: { notifyEmails: ['not-an-email'] },
+    status: 400,
+    label: 'schedule rejects an unusable recipient',
+  });
+  await checkEndpoint('PUT', `/api/schedules/${schedule.id}`, {
+    body: { notifyOn: 'sometimes' },
+    status: 400,
+    label: 'schedule rejects an unknown notify mode',
+  });
+  if (config.mail.configured) {
+    const notified = JSON.parse(
+      (await checkEndpoint('PUT', `/api/schedules/${schedule.id}`, {
+        body: { notifyOn: 'failure', notifyEmails: ['oncall@example.com'] },
+        label: 'schedule accepts notifications',
+      })).text,
+    );
+    if (notified.notifyOn !== 'failure' || !notified.notifyRecipients.includes('oncall@example.com')) {
+      throw new Error(`notification preferences did not round-trip: ${JSON.stringify(notified)}`);
+    }
+  } else {
+    await checkEndpoint('PUT', `/api/schedules/${schedule.id}`, {
+      body: { notifyOn: 'failure' },
+      status: 400,
+      label: 'schedule refuses notifications without a relay',
+    });
+  }
 
   const fired = JSON.parse(
     (await checkEndpoint('POST', `/api/schedules/${schedule.id}/run`, {

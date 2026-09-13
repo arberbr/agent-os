@@ -133,7 +133,7 @@ export async function run(
   await router.navigate({ to: '/settings' });
   await flush();
   const settingsText = role === 'admin'
-    ? ['Settings', 'Access', 'People', 'Account']
+    ? ['Settings', 'Access', 'Email notifications', 'People', 'Account']
     : ['Settings', 'Account'];
   check('/settings', settingsText);
   if (role !== 'admin') {
@@ -388,6 +388,19 @@ export async function run(
   clickButton('New schedule', 'button');
   await flush();
   check('/schedules (editor)', ['Agent', 'Task', 'Cadence', 'Create schedule']);
+
+  // The notification picker is part of the editor, and the relay is not set up
+  // on a fresh instance — so choosing a mode must explain itself rather than
+  // silently promise an email.
+  if (!bodyText().includes('Notify by email')) throw new Error('the notify picker is missing from the editor');
+  clickButton('On failure', 'button');
+  await flush();
+  if (!bodyText().includes('No email relay is set up yet')) {
+    throw new Error('asking for notifications without a relay did not warn');
+  }
+  console.log('ok  [schedules] the notify picker explains itself when no relay is configured');
+  clickButton('Never', 'button');
+  await flush();
 
   const scheduleTask = document.querySelector('#schedule-input') as HTMLTextAreaElement | null;
   const scheduleName = document.querySelector('#schedule-name') as HTMLInputElement | null;

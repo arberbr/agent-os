@@ -3,7 +3,9 @@ import { store } from '../store.js';
 import {
   displayName, hashPassword, isValidEmail, normalizeEmail, passwordProblem, publicUser, requireAdmin,
 } from '../auth.js';
-import type { AppSettings, UserRole } from '../types.js';
+import { DEFAULT_PORTS, MAIL_SECURITIES, isMailSecurity, mailStatus } from '../mail/settings.js';
+import { mailSender } from '../mail/sender.js';
+import type { AppSettings, MailSettings, UserRole } from '../types.js';
 
 const DOMAIN_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 
@@ -31,6 +33,73 @@ function positiveInt(value: unknown, min: number, max: number): number | null {
   if (!Number.isFinite(parsed)) return null;
   const rounded = Math.round(parsed);
   return rounded >= min && rounded <= max ? rounded : null;
+}
+
+/**
+ * Read an SMTP patch from the Settings form.
+ *
+ * The password is deliberately tri-state, because the console never receives
+ * the stored one: absent means "leave it alone", an empty string means "clear
+ * it", and any other string replaces it. Getting this wrong would either wipe a
+ * working credential whenever an unrelated field is saved, or make it
+ * impossible to remove one.
+ */
+function readMailPatch(body: Record<string, unknown>, current: MailSettings): { patch: Partial<MailSettings> } | { error: string } {
+  const patch: Partial<MailSettings> = {};
+
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== 'boolean') return { error: '"enabled" must be true or false.' };
+    patch.enabled = body.enabled;
+  }
+  if (body.host !== undefined) {
+    const host = String(body.host).trim();
+    // A host is either absent or a plausible name/IP — never a URL with a scheme.
+    if (host && !/^[a-z0-9._:[\]-]+$/i.test(host)) {
+      return { error: 'The SMTP host should be a bare host name or IP address, without a scheme (e.g. smtp.example.com).' };
+    }
+    patch.host = host.slice(0, 255);
+  }
+  if (body.security !== undefined) {
+    if (!isMailSecurity(body.security)) {
+      return { error: `Security must be one of: ${MAIL_SECURITIES.join(', ')}.` };
+    }
+    patch.security = body.security;
+    // Moving between modes without a port means the conventional one for the
+    // new mode, not the one that belonged to the old.
+    if (body.port === undefined && current.port === DEFAULT_PORTS[current.security]) {
+      patch.port = DEFAULT_PORTS[body.security];
+    }
+  }
+  if (body.port !== undefined) {
+    const port = positiveInt(body.port, 1, 65535);
+    if (port === null) return { error: 'Port must be a number between 1 and 65535.' };
+    patch.port = port;
+  }
+  if (body.username !== undefined) patch.username = String(body.username).trim().slice(0, 255);
+  if (body.password !== undefined) {
+    if (typeof body.password !== 'string') return { error: 'The password must be a string.' };
+    patch.password = body.password;
+  }
+  if (body.fromName !== undefined) patch.fromName = String(body.fromName).trim().slice(0, 120);
+  if (body.fromEmail !== undefined) {
+    const fromEmail = normalizeEmail(body.fromEmail);
+    if (fromEmail && !isValidEmail(fromEmail)) return { error: 'The sender address is not a valid email address.' };
+    patch.fromEmail = fromEmail;
+  }
+  if (body.replyTo !== undefined) {
+    const replyTo = normalizeEmail(body.replyTo);
+    if (replyTo && !isValidEmail(replyTo)) return { error: 'The reply-to address is not a valid email address.' };
+    patch.replyTo = replyTo;
+  }
+  if (body.verifyCertificate !== undefined) {
+    if (typeof body.verifyCertificate !== 'boolean') return { error: '"verifyCertificate" must be true or false.' };
+    patch.verifyCertificate = body.verifyCertificate;
+  }
+
+  const next = { ...current, ...patch };
+  if (next.enabled && !next.host) return { error: 'An SMTP host is required before notifications can be switched on.' };
+  if (next.enabled && !next.fromEmail) return { error: 'A sender address is required before notifications can be switched on.' };
+  return { patch };
 }
 
 /**
@@ -90,6 +159,71 @@ export function createAdminRouter(): express.Router {
     res.json(store.listUsers().map(publicUser));
   });
 
+  /* ── Email notifications (SMTP) ────────────────────────────────────────
+   *
+   * Admin-only, like the rest of this router: the relay is an instance-wide
+   * credential, and anyone who can write it can redirect every notification.
+   * The password is never returned — only whether one is on file.
+   */
+
+  router.get('/mail', (_req, res) => {
+    res.json({ mail: mailStatus(store.getMailSettings()) });
+  });
+
+  router.put('/mail', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const result = readMailPatch(body, store.getMailSettings());
+    if ('error' in result) return res.status(400).json({ error: result.error });
+    if (Object.keys(result.patch).length === 0) {
+      return res.status(400).json({ error: 'Nothing to update.' });
+    }
+    const saved = store.updateMailSettings(result.patch);
+    // The sender fingerprints the settings and rebuilds its transport, so this
+    // is what makes a saved change take effect on the next message.
+    mailSender.reset();
+    const status = mailStatus(saved);
+    res.json({ mail: status });
+  });
+
+  /** Forget the relay: nothing is sent until credentials are entered again. */
+  router.delete('/mail', (_req, res) => {
+    const cleared = store.clearMailSettings();
+    mailSender.reset();
+    res.json({ mail: mailStatus(cleared) });
+  });
+
+  /**
+   * Prove the relay works. Without `to` this only opens the connection and
+   * authenticates; with `to` it sends a real message, which is the only way to
+   * know the sender address is accepted and delivery actually happens.
+   */
+  router.post('/mail/test', async (req, res) => {
+    const body = (req.body ?? {}) as { to?: unknown };
+    const to = normalizeEmail(body.to) || store.getMailSettings().fromEmail;
+
+    try {
+      const checks: Record<string, { ok: boolean; sample?: unknown; error?: string }> = {};
+      try {
+        checks.connection = { ok: true, sample: await mailSender.verify() };
+      } catch (err) {
+        checks.connection = { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+
+      if (checks.connection.ok && to) {
+        try {
+          const sent = await mailSender.sendTest(to);
+          checks.delivery = { ok: true, sample: { to, messageId: sent.messageId, ms: sent.ms } };
+        } catch (err) {
+          checks.delivery = { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+
+      const ok = Object.values(checks).every((check) => check.ok);
+      return res.status(ok ? 200 : 502).json({ ok, to: to || null, checks });
+    } catch (err) {
+      return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
   /** An admin adds an account directly — the path that works when signups are off. */
   router.post('/users', async (req, res) => {
     const body = (req.body ?? {}) as { email?: unknown; name?: unknown; password?: unknown; role?: unknown };
