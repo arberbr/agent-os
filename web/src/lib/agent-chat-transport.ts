@@ -62,6 +62,10 @@ export class AgentChatTransport implements ChatTransport<UIMessage> {
 
     return createUIMessageStream({
       execute: ({ writer }) => this.streamRun(input, sessionId, writer, abortSignal),
+      // The SDK masks errors as "An error occurred." by default, which is meant
+      // for server-side streams. This one runs in the browser and only rethrows
+      // what our own API already sent, so keep the real message for the chat.
+      onError: (error) => (error instanceof Error ? error.message : String(error)),
     });
   }
 
