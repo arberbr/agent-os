@@ -34,7 +34,8 @@
     "remark-gfm": "^4.0.1",
     "streamdown": "^2.6.0",
     "tailwind-merge": "^3.6.0",
-    "use-stick-to-bottom": "^1.1.6"
+    "use-stick-to-bottom": "^1.1.6",
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
