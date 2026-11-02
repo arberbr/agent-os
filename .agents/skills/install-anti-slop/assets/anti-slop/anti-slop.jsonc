@@ -1,0 +1,62 @@
+{
+	// anti-slop generic rules. Extend this file from the repository's biome.json:
+	//
+	//   "extends": ["./tools/biome/anti-slop/anti-slop.jsonc"]
+	//
+	// Biome plugin entries take no per-rule severity or options. To disable a rule,
+	// remove its entry here; to scope one, add "includes" globs to its entry. Rule
+	// severity and options live in the vendored source (see shared/report.ts).
+	"plugins": [
+		{ "path": "./rules/no-array-filter-map.ts", "resolutionKind": "config" },
+		{
+			"path": "./rules/no-chained-type-assertions.ts",
+			"resolutionKind": "config"
+		},
+		{
+			"path": "./rules/no-conditional-empty-object-spread.ts",
+			"resolutionKind": "config"
+		},
+		{
+			"path": "./rules/no-known-value-widening.ts",
+			"resolutionKind": "config"
+		},
+		{ "path": "./rules/no-module-mocking.ts", "resolutionKind": "config" },
+		{ "path": "./rules/no-object-parameters.ts", "resolutionKind": "config" },
+		{
+			"path": "./rules/no-reduce-accumulator-copy.ts",
+			"resolutionKind": "config"
+		},
+		{ "path": "./rules/no-reflect-apply.ts", "resolutionKind": "config" },
+		{ "path": "./rules/no-reflect-get.ts", "resolutionKind": "config" },
+		{ "path": "./rules/no-runtime-typeof.ts", "resolutionKind": "config" },
+		{
+			"path": "./rules/no-shape-in-symbol-names.ts",
+			"resolutionKind": "config"
+		},
+		{ "path": "./rules/no-unknown-parameters.ts", "resolutionKind": "config" },
+		{ "path": "./rules/no-unknown-returns.ts", "resolutionKind": "config" },
+		{
+			"path": "./rules/no-unknown-type-aliases.ts",
+			"resolutionKind": "config"
+		},
+		{
+			"path": "./rules/no-unsafe-dictionary-type.ts",
+			"resolutionKind": "config"
+		},
+		{ "path": "./rules/no-widen-then-assert.ts", "resolutionKind": "config" },
+		{
+			"path": "./rules/require-readable-spacing.ts",
+			"resolutionKind": "config"
+		},
+		{
+			"path": "./rules/require-safety-comment-for-type-assertion.ts",
+			"resolutionKind": "config"
+		}
+	],
+	"linter": {
+		"rules": {
+			// Native companion to noReduceAccumulatorCopy: spreads of the accumulator in reducers.
+			"performance": { "noAccumulatingSpread": "error" }
+		}
+	}
+}

@@ -1,0 +1,28 @@
+{
+	// Opt-in anti-slop rules for repositories that depend directly on Effect.
+	// Extend it alongside the generic preset:
+	//
+	//   "extends": [
+	//     "./tools/biome/anti-slop/anti-slop.jsonc",
+	//     "./tools/biome/anti-slop/effect/anti-slop-effect.jsonc"
+	//   ]
+	"plugins": [
+		{
+			"path": "./rules/no-manual-effect-error-tag.ts",
+			"resolutionKind": "config"
+		},
+		{
+			"path": "./rules/no-manual-tag-comparison.ts",
+			"resolutionKind": "config"
+		},
+		{
+			"path": "./rules/no-manual-tagged-construction.ts",
+			"resolutionKind": "config"
+		},
+		{
+			"path": "./rules/no-service-constructor-imports.ts",
+			"resolutionKind": "config"
+		},
+		{ "path": "./rules/prefer-effect-match.ts", "resolutionKind": "config" }
+	]
+}
